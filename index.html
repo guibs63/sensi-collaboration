@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Lietome Live 🚀</title>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    body { font-family: Arial; margin: 20px; }
+    #messages { height: 400px; overflow-y: auto; border: 1px solid #ccc; padding: 10px; }
+  </style>
+</head>
+<body>
+
+<h2>Lietome Live 🚀</h2>
+
+Pseudo:
+<input id="username" placeholder="Guillaume">
+Projet:
+<select id="project">
+  <option>Ever</option>
+  <option>Hydrai</option>
+  <option>Sentia</option>
+</select>
+<button onclick="join()">Rejoindre</button>
+
+<hr>
+
+<div id="messages"></div>
+
+<input id="message" placeholder="Message..." style="width:80%">
+<button onclick="sendMessage()">Envoyer</button>
+
+<script>
+const socket = io();
+let currentProject = null;
+
+function join() {
+  currentProject = document.getElementById("project").value;
+  document.getElementById("messages").innerHTML = "";
+  socket.emit("joinProject", currentProject);
+}
+
+socket.on("loadMessages", (messages) => {
+  messages.forEach(msg => addMessage(msg.user, msg.message));
+});
+
+socket.on("chatMessage", (data) => {
+  addMessage(data.user, data.message);
+});
+
+function sendMessage() {
+  const user = document.getElementById("username").value;
+  const message = document.getElementById("message").value;
+
+  if (!message || !currentProject) return;
+
+  socket.emit("chatMessage", {
+    project: currentProject,
+    user,
+    message
+  });
+
+  document.getElementById("message").value = "";
+}
+
+function addMessage(user, message) {
+  const div = document.createElement("div");
+  div.innerHTML = "<b>" + user + ":</b> " + message;
+  document.getElementById("messages").appendChild(div);
+}
+</script>
+
+</body>
+</html>
