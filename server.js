@@ -7,7 +7,15 @@ const OpenAI = require("openai");
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+
+// 🔥 IMPORTANT POUR RAILWAY
+const io = new Server(server, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"],
+  },
+  transports: ["websocket", "polling"],
+});
 
 const PORT = process.env.PORT || 8080;
 
@@ -166,6 +174,6 @@ io.on("connection", (socket) => {
 });
 
 // ===== START =====
-server.listen(PORT, () => {
+server.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
