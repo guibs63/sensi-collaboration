@@ -8,6 +8,7 @@ const input = document.getElementById("message");
 const usernameInput = document.getElementById("username");
 const projectSelect = document.getElementById("project");
 
+// 🔹 Affichage message
 function addMessage(username, message) {
   const div = document.createElement("div");
   div.innerHTML = `<strong>${username}:</strong> ${message}`;
@@ -15,11 +16,23 @@ function addMessage(username, message) {
   chat.scrollTop = chat.scrollHeight;
 }
 
-// 🔹 Charger projets au démarrage
-socket.emit("getProjects");
+// 🔹 Reconnexion automatique (IMPORTANT)
+socket.on("connect", () => {
+  console.log("🟢 Connected to server");
 
+  // Rejoindre le projet courant si défini
+  if (currentProject) {
+    socket.emit("joinProject", currentProject);
+  }
+
+  // Toujours recharger la liste des projets
+  socket.emit("getProjects");
+});
+
+// 🔹 Charger projets
 socket.on("projectList", (projects) => {
   projectSelect.innerHTML = "";
+
   projects.forEach((p) => {
     const option = document.createElement("option");
     option.value = p.name;
@@ -27,20 +40,21 @@ socket.on("projectList", (projects) => {
     projectSelect.appendChild(option);
   });
 
-  if (projects.length > 0) {
+  // Si aucun projet sélectionné, prendre le premier
+  if (!currentProject && projects.length > 0) {
     currentProject = projects[0].name;
     socket.emit("joinProject", currentProject);
   }
 });
 
-// 🔹 Rejoindre projet
+// 🔹 Changement de projet
 projectSelect.addEventListener("change", () => {
   currentProject = projectSelect.value;
   chat.innerHTML = "";
   socket.emit("joinProject", currentProject);
 });
 
-// 🔹 Recevoir historique
+// 🔹 Réception historique
 socket.on("projectHistory", (messages) => {
   chat.innerHTML = "";
   messages.forEach((msg) => {
@@ -48,17 +62,17 @@ socket.on("projectHistory", (messages) => {
   });
 });
 
-// 🔹 Recevoir message live
+// 🔹 Réception message live
 socket.on("chatMessage", (data) => {
   addMessage(data.username, data.message);
 });
 
-// 🔹 Envoyer message
+// 🔹 Envoi message
 form.addEventListener("submit", (e) => {
   e.preventDefault();
 
-  const username = usernameInput.value;
-  const message = input.value;
+  const username = usernameInput.value.trim();
+  const message = input.value.trim();
 
   if (!username || !message || !currentProject) return;
 

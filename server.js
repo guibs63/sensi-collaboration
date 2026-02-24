@@ -49,7 +49,7 @@ app.get("/", (req, res) => {
 
 // ===== SOCKET =====
 io.on("connection", (socket) => {
-  console.log("User connected");
+  console.log("🟢 User connected");
 
   // 🔹 Charger liste projets
   socket.on("getProjects", () => {
@@ -75,7 +75,10 @@ io.on("connection", (socket) => {
 
   // 🔹 Rejoindre projet
   socket.on("joinProject", (project) => {
+    if (!project) return;
+
     socket.join(project);
+    console.log(`🔵 Socket joined project: ${project}`);
 
     db.all(
       "SELECT * FROM messages WHERE project = ? ORDER BY timestamp ASC",
@@ -92,15 +95,18 @@ io.on("connection", (socket) => {
 
     if (!username || !message || !project) return;
 
-    // Enregistrer message utilisateur
+    console.log("📩 Message reçu :", username, message, project);
+
+    // 1️⃣ Enregistrer message utilisateur
     db.run(
       "INSERT INTO messages (username, message, project) VALUES (?, ?, ?)",
       [username, message, project]
     );
 
-    io.to(project).emit("chatMessage", data);
+    // 2️⃣ Envoyer immédiatement aux membres du projet
+    io.in(project).emit("chatMessage", data);
 
-    // ===== SENSI (répond uniquement si @sensi) =====
+    // 3️⃣ SENSI uniquement si mentionnée
     if (!message.toLowerCase().includes("@sensi")) return;
 
     try {
@@ -116,7 +122,6 @@ io.on("connection", (socket) => {
         async (err, history) => {
           if (err) return;
 
-          // Remettre dans l’ordre chronologique
           history.reverse();
 
           const messages = [
@@ -143,7 +148,7 @@ io.on("connection", (socket) => {
             ["Sensi", reply, project]
           );
 
-          io.to(project).emit("chatMessage", {
+          io.in(project).emit("chatMessage", {
             username: "Sensi",
             message: reply,
             project,
@@ -151,16 +156,16 @@ io.on("connection", (socket) => {
         }
       );
     } catch (error) {
-      console.error("OpenAI error:", error);
+      console.error("❌ OpenAI error:", error);
     }
   });
 
   socket.on("disconnect", () => {
-    console.log("User disconnected");
+    console.log("🔴 User disconnected");
   });
 });
 
 // ===== START =====
 server.listen(PORT, () => {
-  console.log(`Server running 🚀 on port ${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
 });
