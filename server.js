@@ -7,6 +7,11 @@ const OpenAI = require("openai");
 const multer = require("multer");
 const fs = require("fs");
 
+const mammoth = require("mammoth");
+const xlsx = require("xlsx");
+const pdfParse = require("pdf-parse");
+const textract = require("textract");
+
 const app = express();
 const server = http.createServer(app);
 
@@ -26,7 +31,7 @@ const openai = new OpenAI({
 
 console.log("✅ OpenAI connected");
 
-// ===== DATABASE =====
+// ================= DATABASE =================
 const db = new sqlite3.Database("./database.sqlite");
 
 db.serialize(() => {
@@ -58,7 +63,7 @@ db.serialize(() => {
   `);
 });
 
-// ===== UPLOAD CONFIG =====
+// ================= UPLOAD CONFIG =================
 if (!fs.existsSync("uploads")) {
   fs.mkdirSync("uploads");
 }
@@ -71,7 +76,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage });
 
-// Route upload
+// Upload route
 app.post("/upload", upload.single("file"), (req, res) => {
   const { project } = req.body;
   const file = req.file;
@@ -83,28 +88,71 @@ app.post("/upload", upload.single("file"), (req, res) => {
   db.run(
     "INSERT INTO project_files (project, filename, filepath) VALUES (?, ?, ?)",
     [project, file.originalname, file.path],
-    () => {
-      res.json({ success: true });
-    }
+    () => res.json({ success: true })
   );
 });
 
-// Servir fichiers uploadés
+// Serve uploaded files
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
-
-// Static
 app.use(express.static(path.resolve(".")));
 
 app.get("/", (req, res) => {
   res.sendFile(path.resolve("index.html"));
 });
 
-// ===== SOCKET =====
+// ================= FILE TEXT EXTRACTION =================
+async function extractTextFromFile(filePath, filename) {
+  const ext = filename.toLowerCase();
+
+  try {
+
+    if (ext.endsWith(".txt") || ext.endsWith(".md") || ext.endsWith(".json")) {
+      return fs.readFileSync(filePath, "utf-8");
+    }
+
+    if (ext.endsWith(".docx")) {
+      const result = await mammoth.extractRawText({ path: filePath });
+      return result.value;
+    }
+
+    if (ext.endsWith(".xlsx") || ext.endsWith(".xls")) {
+      const workbook = xlsx.readFile(filePath);
+      let text = "";
+      workbook.SheetNames.forEach(name => {
+        const sheet = workbook.Sheets[name];
+        text += xlsx.utils.sheet_to_csv(sheet);
+      });
+      return text;
+    }
+
+    if (ext.endsWith(".pdf")) {
+      const buffer = fs.readFileSync(filePath);
+      const data = await pdfParse(buffer);
+      return data.text;
+    }
+
+    // Fallback universel (odt, ods, odp...)
+    return new Promise((resolve) => {
+      textract.fromFileWithPath(filePath, (err, text) => {
+        if (err) resolve("");
+        else resolve(text);
+      });
+    });
+
+  } catch (err) {
+    console.log("Erreur extraction:", filename);
+    return "";
+  }
+}
+
+// ================= SOCKET =================
 io.on("connection", (socket) => {
   console.log("🟢 User connected");
 
+  // Join project
   socket.on("joinProject", ({ project, username }) => {
     if (!project) return;
+
     socket.join(project);
 
     db.all(
@@ -124,10 +172,12 @@ io.on("connection", (socket) => {
     );
   });
 
-  socket.on("chatMessage", (data) => {
+  // Chat message
+  socket.on("chatMessage", async (data) => {
     const { username, message, project } = data;
     if (!username || !message || !project) return;
 
+    // Save user message
     db.run(
       "INSERT INTO messages (username, message, project) VALUES (?, ?, ?)",
       [username, message, project],
@@ -140,10 +190,70 @@ io.on("connection", (socket) => {
         });
       }
     );
+
+    if (!message.toLowerCase().includes("@sensi")) return;
+
+    try {
+      db.all(
+        "SELECT * FROM project_files WHERE project = ?",
+        [project],
+        async (err, files) => {
+
+          let fileContent = "";
+
+          if (files && files.length > 0) {
+            for (let f of files) {
+              const content = await extractTextFromFile(f.filepath, f.filename);
+              fileContent += `\n\n--- Document: ${f.filename} ---\n${content}`;
+            }
+          }
+
+          const cleanedMessage = message.replace(/@sensi/gi, "").trim();
+
+          const response = await openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: [
+              {
+                role: "system",
+                content:
+                  "Tu es Sensi Brain, assistante stratégique du projet. Analyse les documents et conseille intelligemment.",
+              },
+              {
+                role: "system",
+                content: "Contenu des documents :\n" + fileContent,
+              },
+              {
+                role: "user",
+                content: cleanedMessage,
+              },
+            ],
+          });
+
+          const reply = response.choices[0].message.content;
+
+          db.run(
+            "INSERT INTO messages (username, message, project) VALUES (?, ?, ?)",
+            ["Sensi", reply, project]
+          );
+
+          io.in(project).emit("chatMessage", {
+            username: "Sensi",
+            message: reply,
+            project,
+          });
+        }
+      );
+    } catch (error) {
+      console.error("❌ OpenAI error:", error);
+    }
+  });
+
+  socket.on("disconnect", () => {
+    console.log("🔴 User disconnected");
   });
 });
 
-// START
+// ================= START =================
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
