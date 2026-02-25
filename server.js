@@ -19,7 +19,14 @@ app.use(express.static(__dirname));
 const PORT = process.env.PORT || 8080;
 
 // =======================
-// DATABASE
+// 🔎 ENV DEBUG
+// =======================
+
+console.log("ENVIRONMENT:", process.env.RAILWAY_ENVIRONMENT);
+console.log("DATABASE_URL exists:", !!process.env.DATABASE_URL);
+
+// =======================
+// 🗄 DATABASE
 // =======================
 
 const pool = new Pool({
@@ -27,13 +34,22 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
+// Test immédiat connexion DB
+pool.query("SELECT NOW()")
+  .then(res => console.log("✅ DB CONNECTED:", res.rows[0]))
+  .catch(err => console.error("❌ DB CONNECTION ERROR:", err));
+
 // =======================
-// OPENAI
+// 🤖 OPENAI
 // =======================
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
+
+// =======================
+// ROOT
+// =======================
 
 app.get("/", (req, res) => {
   res.sendFile(__dirname + "/index.html");
@@ -44,49 +60,63 @@ app.get("/", (req, res) => {
 // =======================
 
 io.on("connection", (socket) => {
-  console.log("User connected:", socket.id);
+  console.log("🔌 User connected:", socket.id);
 
   // =======================
-  // JOIN PROJECT ROOM
+  // JOIN PROJECT
   // =======================
 
   socket.on("join project", async ({ project }) => {
     socket.join(project);
     socket.project = project;
 
-    console.log(`Socket ${socket.id} joined project ${project}`);
+    console.log(`📂 Socket ${socket.id} joined project ${project}`);
 
     try {
       const result = await pool.query(
-        `SELECT * FROM messages
+        `SELECT username, content, role, project, created_at
+         FROM messages
          WHERE project = $1
          ORDER BY created_at ASC
          LIMIT 100`,
         [project]
       );
 
+      console.log("📜 History loaded:", result.rows.length);
+
       socket.emit("chat history", result.rows);
 
     } catch (err) {
-      console.error("History load error:", err);
+      console.error("❌ History load error:", err);
     }
   });
 
   // =======================
-  // MESSAGE WITH MEMORY
+  // CHAT MESSAGE
   // =======================
 
   socket.on("chat message", async (data) => {
+
+    console.log("📩 DATA RECEIVED:", data);
+
     const { username, message, project } = data;
 
+    if (!username || !message || !project) {
+      console.log("⚠️ Invalid message payload");
+      return;
+    }
+
     try {
+
       // 1️⃣ Save user message
       await pool.query(
         "INSERT INTO messages (username, content, project, role) VALUES ($1,$2,$3,$4)",
         [username, message, project, "user"]
       );
 
-      // 2️⃣ Fetch last 20 messages of this project
+      console.log("💾 User message saved");
+
+      // 2️⃣ Get last 20 messages (memory)
       const historyResult = await pool.query(
         `SELECT role, content
          FROM messages
@@ -99,11 +129,11 @@ io.on("connection", (socket) => {
       const previousMessages = historyResult.rows
         .reverse()
         .map((msg) => ({
-          role: msg.role === "assistant" ? "assistant" : "user",
+          role: msg.role,
           content: msg.content,
         }));
 
-      // 3️⃣ Generate AI response with memory
+      // 3️⃣ Generate AI reply
       const completion = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         messages: [
@@ -124,6 +154,8 @@ io.on("connection", (socket) => {
         ["Sensi", reply, project, "assistant"]
       );
 
+      console.log("🤖 AI message saved");
+
       // 5️⃣ Emit only to project room
       io.to(project).emit("chat message", {
         username: "Sensi",
@@ -132,18 +164,18 @@ io.on("connection", (socket) => {
       });
 
     } catch (err) {
-      console.error("Memory AI error:", err);
+      console.error("❌ MESSAGE ERROR:", err);
 
       socket.emit("chat message", {
         username: "SYSTEM",
-        message: "Erreur IA mémoire.",
+        message: "Erreur serveur.",
         project,
       });
     }
   });
 
   socket.on("disconnect", () => {
-    console.log("User disconnected:", socket.id);
+    console.log("❌ User disconnected:", socket.id);
   });
 });
 

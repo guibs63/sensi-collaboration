@@ -52,6 +52,8 @@ joinBtn.addEventListener("click", () => {
 
   currentProject = project;
 
+  console.log("Joining project:", project);
+
   clearChat();
 
   socket.emit("join project", { project });
@@ -66,13 +68,21 @@ joinBtn.addEventListener("click", () => {
 form.addEventListener("submit", (e) => {
   e.preventDefault();
 
+  console.log("Form submit triggered");
+
   const message = input.value.trim();
   const username = usernameInput.value.trim();
 
-  if (!message || !username || !currentProject) return;
+  if (!message || !username || !currentProject) {
+    console.log("Blocked send:", {
+      message,
+      username,
+      currentProject
+    });
+    return;
+  }
 
-  // Affichage immédiat local
-  addMessage(username, message, "user");
+  console.log("Emitting chat message");
 
   socket.emit("chat message", {
     username,
@@ -88,6 +98,8 @@ form.addEventListener("submit", (e) => {
 // =======================
 
 socket.on("chat message", (data) => {
+  console.log("Received message:", data);
+
   if (!currentProject || data.project !== currentProject) return;
 
   const role = data.username === "Sensi" ? "assistant" : "user";
@@ -96,10 +108,12 @@ socket.on("chat message", (data) => {
 });
 
 // =======================
-// LOAD HISTORY (PAR PROJET)
+// LOAD HISTORY
 // =======================
 
 socket.on("chat history", (messages) => {
+  console.log("History received:", messages.length);
+
   clearChat();
 
   messages.forEach((msg) => {
