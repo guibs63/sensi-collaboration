@@ -19,14 +19,7 @@ app.use(express.static(__dirname));
 const PORT = process.env.PORT || 8080;
 
 // =======================
-// 🔎 ENV DEBUG
-// =======================
-
-console.log("ENVIRONMENT:", process.env.RAILWAY_ENVIRONMENT);
-console.log("DATABASE_URL exists:", !!process.env.DATABASE_URL);
-
-// =======================
-// 🗄 DATABASE
+// DATABASE
 // =======================
 
 const pool = new Pool({
@@ -34,13 +27,12 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
-// Test immédiat connexion DB
 pool.query("SELECT NOW()")
   .then(res => console.log("✅ DB CONNECTED:", res.rows[0]))
-  .catch(err => console.error("❌ DB CONNECTION ERROR:", err));
+  .catch(err => console.error("❌ DB ERROR:", err));
 
 // =======================
-// 🤖 OPENAI
+// OPENAI
 // =======================
 
 const openai = new OpenAI({
@@ -60,63 +52,53 @@ app.get("/", (req, res) => {
 // =======================
 
 io.on("connection", (socket) => {
+
   console.log("🔌 User connected:", socket.id);
 
-  // =======================
   // JOIN PROJECT
-  // =======================
-
   socket.on("join project", async ({ project }) => {
+
+    if (!project) return;
+
     socket.join(project);
     socket.project = project;
 
-    console.log(`📂 Socket ${socket.id} joined project ${project}`);
+    console.log(`📂 Joined project ${project}`);
 
     try {
       const result = await pool.query(
         `SELECT username, content, role, project, created_at
          FROM messages
          WHERE project = $1
-         ORDER BY created_at ASC
-         LIMIT 100`,
+         ORDER BY created_at ASC`,
         [project]
       );
-
-      console.log("📜 History loaded:", result.rows.length);
 
       socket.emit("chat history", result.rows);
 
     } catch (err) {
-      console.error("❌ History load error:", err);
+      console.error("❌ History error:", err);
     }
   });
 
-  // =======================
-  // CHAT MESSAGE
-  // =======================
-
+  // MESSAGE
   socket.on("chat message", async (data) => {
 
     console.log("📩 DATA RECEIVED:", data);
 
     const { username, message, project } = data;
 
-    if (!username || !message || !project) {
-      console.log("⚠️ Invalid message payload");
-      return;
-    }
+    if (!username || !message || !project) return;
 
     try {
 
-      // 1️⃣ Save user message
+      // Save user message
       await pool.query(
         "INSERT INTO messages (username, content, project, role) VALUES ($1,$2,$3,$4)",
         [username, message, project, "user"]
       );
 
-      console.log("💾 User message saved");
-
-      // 2️⃣ Get last 20 messages (memory)
+      // Load last 20 messages
       const historyResult = await pool.query(
         `SELECT role, content
          FROM messages
@@ -133,14 +115,14 @@ io.on("connection", (socket) => {
           content: msg.content,
         }));
 
-      // 3️⃣ Generate AI reply
+      // Generate AI
       const completion = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         messages: [
           {
             role: "system",
             content: `You are Sensi, AI assistant for project ${project}.
-            You remember previous discussions of this project and respond coherently.`,
+            You remember previous discussions of this project.`,
           },
           ...previousMessages,
         ],
@@ -148,15 +130,13 @@ io.on("connection", (socket) => {
 
       const reply = completion.choices[0].message.content;
 
-      // 4️⃣ Save AI reply
+      // Save AI reply
       await pool.query(
         "INSERT INTO messages (username, content, project, role) VALUES ($1,$2,$3,$4)",
         ["Sensi", reply, project, "assistant"]
       );
 
-      console.log("🤖 AI message saved");
-
-      // 5️⃣ Emit only to project room
+      // Emit to room
       io.to(project).emit("chat message", {
         username: "Sensi",
         message: reply,
@@ -165,12 +145,6 @@ io.on("connection", (socket) => {
 
     } catch (err) {
       console.error("❌ MESSAGE ERROR:", err);
-
-      socket.emit("chat message", {
-        username: "SYSTEM",
-        message: "Erreur serveur.",
-        project,
-      });
     }
   });
 
@@ -178,10 +152,6 @@ io.on("connection", (socket) => {
     console.log("❌ User disconnected:", socket.id);
   });
 });
-
-// =======================
-// START
-// =======================
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port " + PORT);

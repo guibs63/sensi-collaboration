@@ -10,7 +10,7 @@ const joinBtn = document.getElementById("join");
 let currentProject = null;
 
 // =======================
-// UI HELPERS
+// UI
 // =======================
 
 function addMessage(username, message, role = "user") {
@@ -37,27 +37,19 @@ function clearChat() {
 // =======================
 
 joinBtn.addEventListener("click", () => {
+
   const project = projectSelect.value;
   const username = usernameInput.value.trim();
 
-  if (!username) {
-    alert("Enter username");
-    return;
-  }
+  if (!username || !project) return;
 
-  if (!project) {
-    alert("Select project");
-    return;
-  }
+  if (currentProject === project) return;
 
   currentProject = project;
 
-  console.log("Joining project:", project);
-
-  clearChat();
-
   socket.emit("join project", { project });
 
+  clearChat();
   addMessage("SYSTEM", `Connecté au projet ${project}`, "system");
 });
 
@@ -68,21 +60,12 @@ joinBtn.addEventListener("click", () => {
 form.addEventListener("submit", (e) => {
   e.preventDefault();
 
-  console.log("Form submit triggered");
-
   const message = input.value.trim();
   const username = usernameInput.value.trim();
 
-  if (!message || !username || !currentProject) {
-    console.log("Blocked send:", {
-      message,
-      username,
-      currentProject
-    });
-    return;
-  }
+  if (!message || !username || !currentProject) return;
 
-  console.log("Emitting chat message");
+  addMessage(username, message, "user");
 
   socket.emit("chat message", {
     username,
@@ -98,9 +81,9 @@ form.addEventListener("submit", (e) => {
 // =======================
 
 socket.on("chat message", (data) => {
-  console.log("Received message:", data);
+  if (!currentProject) return;
 
-  if (!currentProject || data.project !== currentProject) return;
+  if (data.project !== currentProject) return;
 
   const role = data.username === "Sensi" ? "assistant" : "user";
 
@@ -112,7 +95,6 @@ socket.on("chat message", (data) => {
 // =======================
 
 socket.on("chat history", (messages) => {
-  console.log("History received:", messages.length);
 
   clearChat();
 
@@ -126,16 +108,4 @@ socket.on("chat history", (messages) => {
 
     addMessage(msg.username, msg.content, role);
   });
-});
-
-// =======================
-// CONNECTION STATUS
-// =======================
-
-socket.on("connect", () => {
-  console.log("Connected to server");
-});
-
-socket.on("disconnect", () => {
-  console.log("Disconnected from server");
 });
