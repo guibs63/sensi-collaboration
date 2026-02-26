@@ -1,13 +1,17 @@
-const socket = io({
-  transports: ["websocket", "polling"], // safe on Railway
-});
+const socket = io({ transports: ["websocket", "polling"] });
 
 const chat = document.getElementById("chat");
 const form = document.getElementById("chat-form");
 const input = document.getElementById("message");
 const usernameInput = document.getElementById("username");
+
 const projectSelect = document.getElementById("project");
 const joinBtn = document.getElementById("join-btn");
+
+const newProjectInput = document.getElementById("new-project");
+const createProjectBtn = document.getElementById("create-project-btn");
+const deleteProjectBtn = document.getElementById("delete-project-btn");
+
 const typingDiv = document.getElementById("typing");
 const connStatus = document.getElementById("conn-status");
 
@@ -17,43 +21,22 @@ let typingTimeout = null;
 // -----------------------
 // CONNECTION UI
 // -----------------------
-socket.on("connect", () => {
-  connStatus.textContent = "Connecté ✅";
-});
-socket.on("disconnect", () => {
-  connStatus.textContent = "Déconnecté ❌";
-});
-socket.on("connect_error", () => {
-  connStatus.textContent = "Erreur connexion ⚠️";
-});
+socket.on("connect", () => (connStatus.textContent = "Connecté ✅"));
+socket.on("disconnect", () => (connStatus.textContent = "Déconnecté ❌"));
+socket.on("connect_error", () => (connStatus.textContent = "Erreur connexion ⚠️"));
 
 // -----------------------
-// LOAD PROJECTS
+// HELPERS
 // -----------------------
-async function loadProjects() {
-  const res = await fetch("/projects");
-  const projects = await res.json();
-
-  projectSelect.innerHTML = "";
-
-  projects.forEach((p) => {
-    const option = document.createElement("option");
-    option.value = p.name;
-    option.textContent = p.name;
-    projectSelect.appendChild(option);
-  });
-
-  if (projects.length > 0) {
-    currentProject = projects[0].name;
-    socket.emit("join project", { project: currentProject });
-  }
+function escapeHtml(str) {
+  return String(str)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
-loadProjects();
-
-// -----------------------
-// UI HELPERS
-// -----------------------
 function addMessage(id, username, message, role) {
   const div = document.createElement("div");
   div.className = "msg";
@@ -71,19 +54,9 @@ function addMessage(id, username, message, role) {
   chat.scrollTop = chat.scrollHeight;
 }
 
-function escapeHtml(str) {
-  return String(str)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-// delete click
+// soft delete message
 chat.addEventListener("click", async (e) => {
   if (!e.target.classList.contains("delete-btn")) return;
-
   const id = e.target.dataset.id;
   await fetch(`/messages/${id}`, { method: "DELETE" });
 
@@ -92,16 +65,93 @@ chat.addEventListener("click", async (e) => {
 });
 
 // -----------------------
-// JOIN PROJECT
+// PROJECTS
 // -----------------------
+async function loadProjects(selectProjectName = null) {
+  const res = await fetch("/projects");
+  const projects = await res.json();
+
+  projectSelect.innerHTML = "";
+
+  projects.forEach((p) => {
+    const option = document.createElement("option");
+    option.value = p.name;
+    option.textContent = p.name;
+    projectSelect.appendChild(option);
+  });
+
+  if (projects.length === 0) {
+    currentProject = null;
+    chat.innerHTML = `<div class="muted">Aucun projet. Crée-en un ci-dessus 👆</div>`;
+    return;
+  }
+
+  // if asked to select a specific project name
+  const names = projects.map((p) => p.name);
+  const target = selectProjectName && names.includes(selectProjectName)
+    ? selectProjectName
+    : projects[0].name;
+
+  projectSelect.value = target;
+  currentProject = target;
+
+  socket.emit("join project", { project: currentProject });
+}
+
 function joinSelectedProject() {
-  currentProject = projectSelect.value;
+  const selected = projectSelect.value;
+  if (!selected) return;
+
+  currentProject = selected;
   chat.innerHTML = "";
   socket.emit("join project", { project: currentProject });
 }
 
 projectSelect.addEventListener("change", joinSelectedProject);
-if (joinBtn) joinBtn.addEventListener("click", joinSelectedProject);
+joinBtn.addEventListener("click", joinSelectedProject);
+
+// Create project
+createProjectBtn.addEventListener("click", async () => {
+  const name = newProjectInput.value.trim();
+  if (!name) return alert("Nom de projet requis.");
+
+  const res = await fetch("/projects", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    return alert(err.error || "Impossible de créer le projet.");
+  }
+
+  newProjectInput.value = "";
+  await loadProjects(name); // refresh and auto-select the created project
+});
+
+// Delete project
+deleteProjectBtn.addEventListener("click", async () => {
+  const name = projectSelect.value;
+  if (!name) return;
+
+  const ok = confirm(`Supprimer le projet "${name}" et ses messages ?`);
+  if (!ok) return;
+
+  const res = await fetch(`/projects/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    return alert(err.error || "Impossible de supprimer le projet.");
+  }
+
+  await loadProjects(); // refresh list
+});
+
+// Initial load
+loadProjects();
 
 // -----------------------
 // SEND MESSAGE
@@ -120,9 +170,10 @@ form.addEventListener("submit", (e) => {
   socket.emit("stop typing", { project: currentProject });
 });
 
-// typing (optionnel mais clean)
+// typing indicator
 input.addEventListener("input", () => {
   if (!currentProject) return;
+
   socket.emit("typing", { project: currentProject });
 
   clearTimeout(typingTimeout);
@@ -145,26 +196,19 @@ socket.on("chat message", (data) => {
   );
 });
 
-// -----------------------
-// HISTORY
-// -----------------------
+// history
 socket.on("chat history", (messages) => {
   chat.innerHTML = "";
-  messages.forEach((msg) => {
-    addMessage(msg.id, msg.username, msg.content, msg.role);
-  });
+  messages.forEach((msg) => addMessage(msg.id, msg.username, msg.content, msg.role));
 });
 
-// -----------------------
-// TYPING
-// -----------------------
+// typing
 socket.on("typing", (data) => {
   if (data.project !== currentProject) return;
   typingDiv.style.display = "block";
 });
 
 socket.on("stop typing", (data) => {
-  // data peut être undefined selon emit côté serveur => on gère quand même
   if (data?.project && data.project !== currentProject) return;
   typingDiv.style.display = "none";
 });

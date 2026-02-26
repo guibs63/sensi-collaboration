@@ -7,7 +7,7 @@ const { Pool } = require("pg");
 const OpenAI = require("openai");
 
 const app = express();
-app.set("trust proxy", 1); // Railway / proxies
+app.set("trust proxy", 1);
 
 const server = http.createServer(app);
 
@@ -20,20 +20,11 @@ const io = new Server(server, {
 // -----------------------
 app.use(cors());
 app.use(express.json());
-
-// Static files (index.html, client.js, etc.)
 app.use(express.static(path.join(__dirname)));
 
-// Fix favicon spam 404
 app.get("/favicon.ico", (req, res) => res.status(204).end());
-
-// Healthcheck Railway (NE PAS utiliser "/")
 app.get("/health", (req, res) => res.status(200).send("OK"));
-
-// Root: serve index.html
-app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "index.html"));
-});
+app.get("/", (req, res) => res.sendFile(path.join(__dirname, "index.html")));
 
 const PORT = process.env.PORT || 8080;
 
@@ -74,7 +65,7 @@ app.get("/projects", async (req, res) => {
 
 app.post("/projects", async (req, res) => {
   const { name } = req.body;
-  if (!name) return res.status(400).json({ error: "Name required" });
+  if (!name || !name.trim()) return res.status(400).json({ error: "Name required" });
 
   try {
     await pool.query("INSERT INTO projects (name) VALUES ($1)", [name.trim()]);
@@ -105,7 +96,6 @@ app.delete("/projects/:name", async (req, res) => {
 app.delete("/messages/:id", async (req, res) => {
   try {
     const { id } = req.params;
-
     await pool.query("UPDATE messages SET deleted = TRUE WHERE id = $1", [id]);
     res.json({ success: true });
   } catch (error) {
@@ -156,7 +146,6 @@ io.on("connection", (socket) => {
     if (!username || !message || !project) return;
 
     try {
-      // Save user message
       const insertUser = await pool.query(
         "INSERT INTO messages (username, content, project, role) VALUES ($1,$2,$3,$4) RETURNING id",
         [username, message, project, "user"]
@@ -171,10 +160,8 @@ io.on("connection", (socket) => {
         project,
       });
 
-      // show typing only to others (not spamming sender)
       socket.to(project).emit("typing", { project, username: "Sensi" });
 
-      // Load last 20 messages
       const history = await pool.query(
         `SELECT role, content
          FROM messages
@@ -189,7 +176,6 @@ io.on("connection", (socket) => {
         content: msg.content,
       }));
 
-      // OpenAI call
       const completion = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         messages: [
@@ -237,17 +223,6 @@ Current project context: ${project}.`,
       });
     }
   });
-});
-
-// -----------------------
-// GLOBAL ERROR HANDLER
-// -----------------------
-process.on("unhandledRejection", (err) => {
-  console.error("❌ Unhandled Rejection:", err);
-});
-
-process.on("uncaughtException", (err) => {
-  console.error("❌ Uncaught Exception:", err);
 });
 
 // -----------------------

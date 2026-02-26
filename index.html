@@ -8,11 +8,12 @@
       body { font-family: Arial, sans-serif; margin: 0; padding: 0; background:#f6f6f6; }
       .container { max-width: 900px; margin: 0 auto; padding: 16px; }
       .card { background: #fff; border-radius: 10px; padding: 14px; box-shadow: 0 2px 10px rgba(0,0,0,.06); }
-      .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+      .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
       label { font-size: 12px; color:#444; }
       input, select, button { padding: 10px; border-radius: 8px; border: 1px solid #ddd; }
       button { cursor:pointer; border: 0; background:#111; color:#fff; }
       button.secondary { background:#eee; color:#111; border:1px solid #ddd; }
+      button.danger { background:#b91c1c; }
       #chat { margin-top: 14px; height: 60vh; overflow:auto; background:#fff; border-radius:10px; padding: 12px; border:1px solid #eee; }
       .msg { padding: 8px 10px; border-bottom: 1px solid #f0f0f0; display:flex; align-items:flex-start; gap:10px; }
       .msg strong { display:inline-block; min-width: 90px; }
@@ -23,8 +24,11 @@
       #message { flex: 1; }
       .topbar { display:flex; justify-content: space-between; align-items:center; margin-bottom: 10px; }
       .badge { font-size: 12px; background:#f1f1f1; padding: 6px 10px; border-radius: 999px; }
+      .divider { height: 1px; background:#eee; margin: 10px 0; }
+      .hint { font-size: 12px; color:#666; margin-top: 6px; }
     </style>
   </head>
+
   <body>
     <div class="container">
       <div class="topbar">
@@ -44,12 +48,31 @@
             <select id="project"></select>
           </div>
 
-          <div style="display:flex; gap:8px; align-items:end;">
+          <div>
             <button id="join-btn" type="button">Rejoindre</button>
           </div>
 
           <div style="margin-left:auto;" class="muted">
             Astuce : change de projet → historique chargé automatiquement
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- ✅ CRUD projets à la volée -->
+        <div class="row">
+          <div style="flex:1; min-width: 240px;">
+            <label>Nouveau projet</label><br />
+            <input id="new-project" placeholder="Ex: EverCell / VIGI-SCREEN / SENTIA" autocomplete="off" />
+            <div class="hint">Créer / supprimer sans quitter la page.</div>
+          </div>
+
+          <div>
+            <button id="create-project-btn" type="button" class="secondary">+ Créer</button>
+          </div>
+
+          <div>
+            <button id="delete-project-btn" type="button" class="danger">🗑 Supprimer</button>
           </div>
         </div>
 
@@ -63,7 +86,6 @@
       </div>
     </div>
 
-    <!-- Socket.io client served by server -->
     <script src="/socket.io/socket.io.js"></script>
     <script src="/client.js"></script>
   </body>
