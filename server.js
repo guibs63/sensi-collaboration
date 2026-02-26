@@ -7,21 +7,21 @@ const http = require("http");
 const path = require("path");
 const { Server } = require("socket.io");
 const { Pool } = require("pg");
-
-// (optionnel) OpenAI — garde seulement si tu l'utilises vraiment
-// const OpenAI = require("openai");
+// const OpenAI = require("openai"); // garde seulement si tu l'utilises
 
 const app = express();
 app.set("trust proxy", 1);
 
 app.use(cors());
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "public")));
 
-const server = http.createServer(app);
+// ✅ IMPORTANT : chez toi, index.html/client.js/style.css sont à la racine
+// donc on sert les fichiers statiques depuis __dirname
+app.use(express.static(__dirname));
 
-const io = new Server(server, {
-  cors: { origin: "*", methods: ["GET", "POST", "DELETE"] },
+// ✅ Route racine (évite le 404 sur "/")
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "index.html"));
 });
 
 // --- DB
@@ -57,7 +57,7 @@ async function ensureTables() {
 }
 ensureTables().catch((e) => console.error("ensureTables error:", e));
 
-// --- HEALTH (test immédiat)
+// --- HEALTH
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
@@ -71,7 +71,7 @@ function cleanStr(v) {
   return String(v ?? "").trim();
 }
 
-// ---- REST (supports both /projects and /api/projects)
+// ---- Handlers REST
 async function getProjects(req, res) {
   try {
     const r = await pool.query("SELECT name FROM projects ORDER BY created_at DESC");
@@ -132,27 +132,32 @@ async function getMessages(req, res) {
   }
 }
 
-// Routes sans /api
+// ---- Routes REST (sans /api)
 app.get("/projects", getProjects);
 app.post("/projects", createProject);
 app.delete("/projects/:name", deleteProject);
 
 app.get("/messages", getMessages);
 
-// Routes avec /api (alias)
+// ---- Routes REST (alias /api)
 app.get("/api/projects", getProjects);
 app.post("/api/projects", createProject);
 app.delete("/api/projects/:name", deleteProject);
 
 app.get("/api/messages", getMessages);
 
-// --- Socket.io
+// ---- Socket.io
+const server = http.createServer(app);
+
+const io = new Server(server, {
+  cors: { origin: "*", methods: ["GET", "POST", "DELETE"] },
+});
+
 io.on("connection", (socket) => {
   socket.on("joinProject", ({ project }) => {
     const p = cleanStr(project);
     if (!p) return;
 
-    // leave other rooms
     for (const room of socket.rooms) {
       if (room !== socket.id) socket.leave(room);
     }
@@ -201,10 +206,15 @@ io.on("connection", (socket) => {
   });
 });
 
-// --- Debug 404 (super utile en prod)
+// --- 404 JSON (API) + fallback
 app.use((req, res) => {
-  console.warn("404:", req.method, req.url);
-  res.status(404).json({ error: "Not found", path: req.url });
+  // si c’est une route API, renvoie JSON
+  if (req.path.startsWith("/api") || req.path.startsWith("/messages") || req.path.startsWith("/projects")) {
+    return res.status(404).json({ error: "Not found", path: req.url });
+  }
+
+  // sinon, tente de renvoyer l'index (utile si tu navigues côté client)
+  return res.sendFile(path.join(__dirname, "index.html"));
 });
 
 const PORT = process.env.PORT || 3000;
