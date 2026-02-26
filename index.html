@@ -1,92 +1,110 @@
+<!-- guibs:/index.html -->
 <!doctype html>
 <html lang="fr">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Lietome Live</title>
-    <style>
-      body { font-family: Arial, sans-serif; margin: 0; padding: 0; background:#f6f6f6; }
-      .container { max-width: 900px; margin: 0 auto; padding: 16px; }
-      .card { background: #fff; border-radius: 10px; padding: 14px; box-shadow: 0 2px 10px rgba(0,0,0,.06); }
-      .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
-      label { font-size: 12px; color:#444; }
-      input, select, button { padding: 10px; border-radius: 8px; border: 1px solid #ddd; }
-      button { cursor:pointer; border: 0; background:#111; color:#fff; }
-      button.secondary { background:#eee; color:#111; border:1px solid #ddd; }
-      button.danger { background:#b91c1c; }
-      #chat { margin-top: 14px; height: 60vh; overflow:auto; background:#fff; border-radius:10px; padding: 12px; border:1px solid #eee; }
-      .msg { padding: 8px 10px; border-bottom: 1px solid #f0f0f0; display:flex; align-items:flex-start; gap:10px; }
-      .msg strong { display:inline-block; min-width: 90px; }
-      .msg .delete-btn { margin-left:auto; background: transparent; border: 0; cursor:pointer; font-size: 16px; }
-      .muted { color:#666; font-size: 12px; }
-      .typing { margin-top: 10px; color:#666; font-style: italic; }
-      form { margin-top: 12px; display:flex; gap: 10px; }
-      #message { flex: 1; }
-      .topbar { display:flex; justify-content: space-between; align-items:center; margin-bottom: 10px; }
-      .badge { font-size: 12px; background:#f1f1f1; padding: 6px 10px; border-radius: 999px; }
-      .divider { height: 1px; background:#eee; margin: 10px 0; }
-      .hint { font-size: 12px; color:#666; margin-top: 6px; }
-    </style>
-  </head>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sensi-Coworking ✨</title>
 
-  <body>
-    <div class="container">
-      <div class="topbar">
-        <h2 style="margin:0;">Lietome Live 🚀</h2>
-        <div class="badge" id="conn-status">Connexion…</div>
-      </div>
+  <style>
+    body { font-family: Arial, sans-serif; background:#fff; margin:0; }
+    .wrap { max-width: 980px; margin: 20px auto; padding: 0 12px; }
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 16px; background:#fff; }
+    .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    input, select, button { padding: 8px 10px; }
+    input, select { border: 1px solid #ddd; border-radius: 6px; }
+    button { border: 1px solid #ddd; border-radius: 6px; background:#fff; cursor:pointer; }
+    button:hover { filter: brightness(0.98); }
 
-      <div class="card">
-        <div class="row">
-          <div>
-            <label>Pseudo</label><br />
-            <input id="username" placeholder="Guibs" autocomplete="off" />
-          </div>
+    .topbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+    .hint { font-size: 12px; color:#666; }
 
-          <div>
-            <label>Projet</label><br />
-            <select id="project"></select>
-          </div>
+    /* Chat */
+    #chat { margin-top: 12px; min-height: 420px; border: 1px solid #eee; border-radius: 10px; padding: 10px; }
+    .msg{
+      padding: 10px 6px;
+      border-top: 1px solid #eee;
+      display:flex;
+      justify-content:space-between;
+      gap:10px;
+    }
+    .msg:first-child { border-top:none; }
+    .msg-left{ max-width: 85%; overflow-wrap:anywhere; }
+    .msg-right{ display:flex; align-items:center; gap:8px; }
 
-          <div>
-            <button id="join-btn" type="button">Rejoindre</button>
-          </div>
+    /* ✅ bouton suppression */
+    .msg-del{
+      cursor:pointer;
+      border: 1px solid #ddd;
+      background:#fff;
+      border-radius:6px;
+      padding: 4px 8px;
+    }
+    .msg-del:hover{ filter: brightness(0.97); }
 
-          <div style="margin-left:auto;" class="muted">
-            Astuce : change de projet → historique chargé automatiquement
-          </div>
-        </div>
+    .danger { background:#d00; color:#fff; border:none; }
+    .danger:hover { filter: brightness(0.95); }
 
-        <div class="divider"></div>
+    .form-row { margin-top:14px; }
+    #message { flex:1; min-width: 240px; }
+    .status { display:flex; align-items:center; gap:8px; }
+    .dot { width:10px; height:10px; border-radius:999px; background:#18a558; display:inline-block; }
+  </style>
+</head>
 
-        <!-- ✅ CRUD projets à la volée -->
-        <div class="row">
-          <div style="flex:1; min-width: 240px;">
-            <label>Nouveau projet</label><br />
-            <input id="new-project" placeholder="Ex: EverCell / VIGI-SCREEN / SENTIA" autocomplete="off" />
-            <div class="hint">Créer / supprimer sans quitter la page.</div>
-          </div>
-
-          <div>
-            <button id="create-project-btn" type="button" class="secondary">+ Créer</button>
-          </div>
-
-          <div>
-            <button id="delete-project-btn" type="button" class="danger">🗑 Supprimer</button>
-          </div>
-        </div>
-
-        <div id="chat"></div>
-        <div id="typing" class="typing" style="display:none;">Sensi est en train d'écrire...</div>
-
-        <form id="chat-form">
-          <input id="message" placeholder="Écris un message…" autocomplete="off" />
-          <button type="submit">Envoyer</button>
-        </form>
-      </div>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <h2 style="margin:0;">Sensi-Coworking ✨</h2>
+      <div class="status"><span class="dot"></span><span>Connecté</span></div>
     </div>
 
-    <script src="/socket.io/socket.io.js"></script>
-    <script src="/client.js"></script>
-  </body>
+    <div class="card">
+      <!-- Ligne pseudo / projet -->
+      <div class="row">
+        <div>
+          <div class="hint">Pseudo</div>
+          <input id="username" placeholder="Guibs" />
+        </div>
+
+        <div>
+          <div class="hint">Projet</div>
+          <select id="project"></select>
+        </div>
+
+        <button id="join">Rejoindre</button>
+
+        <div style="flex:1"></div>
+        <div class="hint">Astuce : change de projet → historique chargé automatiquement</div>
+      </div>
+
+      <hr style="border:none;border-top:1px solid #eee;margin:14px 0;" />
+
+      <!-- CRUD projet -->
+      <div class="row">
+        <div style="flex:1; min-width:260px;">
+          <div class="hint">Nouveau projet</div>
+          <input id="new-project" placeholder="Ex: EverCell / VIGI-SCREEN" style="width:100%;" />
+          <div class="hint">Créer / supprimer sans quitter la page.</div>
+        </div>
+
+        <button id="create-project">+ Créer</button>
+        <button id="delete-project" class="danger">Supprimer</button>
+      </div>
+
+      <!-- Chat -->
+      <div id="chat"></div>
+
+      <!-- Form message -->
+      <form id="chat-form" class="row form-row">
+        <input id="message" placeholder="Écris un message..." autocomplete="off" />
+        <button type="submit">Envoyer</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- IMPORTANT : client.js est à la racine -->
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/client.js"></script>
+</body>
 </html>
