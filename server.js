@@ -40,14 +40,27 @@ const openai = new OpenAI({
 });
 
 // =======================
+// HEALTH CHECK (important Railway)
+// =======================
+
+app.get("/", (req, res) => {
+  res.send("🚀 Server is running");
+});
+
+// =======================
 // PROJECT CRUD
 // =======================
 
 app.get("/projects", async (req, res) => {
-  const result = await pool.query(
-    "SELECT name FROM projects ORDER BY created_at ASC"
-  );
-  res.json(result.rows);
+  try {
+    const result = await pool.query(
+      "SELECT name FROM projects ORDER BY created_at ASC"
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error("❌ /projects error:", error);
+    res.status(500).json({ error: "Database error" });
+  }
 });
 
 app.post("/projects", async (req, res) => {
@@ -60,18 +73,24 @@ app.post("/projects", async (req, res) => {
       [name.trim()]
     );
     res.json({ success: true });
-  } catch {
-    res.status(400).json({ error: "Project exists" });
+  } catch (error) {
+    console.error("❌ create project error:", error);
+    res.status(400).json({ error: "Project exists or DB error" });
   }
 });
 
 app.delete("/projects/:name", async (req, res) => {
-  const name = req.params.name;
+  try {
+    const name = req.params.name;
 
-  await pool.query("DELETE FROM messages WHERE project = $1", [name]);
-  await pool.query("DELETE FROM projects WHERE name = $1", [name]);
+    await pool.query("DELETE FROM messages WHERE project = $1", [name]);
+    await pool.query("DELETE FROM projects WHERE name = $1", [name]);
 
-  res.json({ success: true });
+    res.json({ success: true });
+  } catch (error) {
+    console.error("❌ delete project error:", error);
+    res.status(500).json({ error: "Database error" });
+  }
 });
 
 // =======================
@@ -79,14 +98,19 @@ app.delete("/projects/:name", async (req, res) => {
 // =======================
 
 app.delete("/messages/:id", async (req, res) => {
-  const { id } = req.params;
+  try {
+    const { id } = req.params;
 
-  await pool.query(
-    "UPDATE messages SET deleted = TRUE WHERE id = $1",
-    [id]
-  );
+    await pool.query(
+      "UPDATE messages SET deleted = TRUE WHERE id = $1",
+      [id]
+    );
 
-  res.json({ success: true });
+    res.json({ success: true });
+  } catch (error) {
+    console.error("❌ delete message error:", error);
+    res.status(500).json({ error: "Database error" });
+  }
 });
 
 // =======================
@@ -98,24 +122,26 @@ io.on("connection", (socket) => {
   console.log("🔌 User connected:", socket.id);
 
   socket.on("join project", async ({ project }) => {
-
     if (!project) return;
 
-    socket.join(project);
+    try {
+      socket.join(project);
 
-    const result = await pool.query(
-      `SELECT id, username, content, role, project, created_at
-       FROM messages
-       WHERE project = $1 AND deleted = FALSE
-       ORDER BY created_at ASC`,
-      [project]
-    );
+      const result = await pool.query(
+        `SELECT id, username, content, role, project, created_at
+         FROM messages
+         WHERE project = $1 AND deleted = FALSE
+         ORDER BY created_at ASC`,
+        [project]
+      );
 
-    socket.emit("chat history", result.rows);
+      socket.emit("chat history", result.rows);
+    } catch (error) {
+      console.error("❌ join project error:", error);
+    }
   });
 
   socket.on("chat message", async (data) => {
-
     const { username, message, project } = data;
     if (!username || !message || !project) return;
 
@@ -141,7 +167,7 @@ io.on("connection", (socket) => {
         project,
       });
 
-      // Load memory
+      // Load last 20 messages
       const history = await pool.query(
         `SELECT role, content
          FROM messages
@@ -171,13 +197,6 @@ io.on("connection", (socket) => {
 You are Sensi, an intelligent collaborative AI assistant.
 
 You operate inside a multi-project workspace.
-
-You can:
-- Answer general knowledge questions
-- Help with technical topics
-- Discuss project-related ideas
-- Chat naturally
-
 You are NOT restricted to project context unless explicitly requested.
 
 Today's date is ${new Date().toLocaleDateString()}.
@@ -185,10 +204,7 @@ Current project context: ${project}.
 `
           },
           ...previousMessages,
-          {
-            role: "user",
-            content: message
-          }
+          { role: "user", content: message }
         ],
       });
 
@@ -211,16 +227,32 @@ Current project context: ${project}.
       });
 
     } catch (error) {
-      console.error("❌ OpenAI Error:", error);
+      console.error("❌ OpenAI or DB Error:", error);
 
       io.to(project).emit("chat message", {
         username: "Sensi",
-        message: "⚠️ Désolée, une erreur est survenue côté IA.",
+        message: "⚠️ Une erreur est survenue côté IA.",
         project,
       });
     }
   });
 });
+
+// =======================
+// GLOBAL ERROR HANDLER
+// =======================
+
+process.on("unhandledRejection", (err) => {
+  console.error("❌ Unhandled Rejection:", err);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("❌ Uncaught Exception:", err);
+});
+
+// =======================
+// START SERVER
+// =======================
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port " + PORT);
