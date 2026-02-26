@@ -1,120 +1,139 @@
+// guibs:/server.js
+"use strict";
+
 const express = require("express");
 const cors = require("cors");
 const http = require("http");
+const path = require("path");
 const { Server } = require("socket.io");
-const { Pool } = require("pg");
-const OpenAI = require("openai");
-require("dotenv").config();
-
-// =======================
-// INIT
-// =======================
 
 const app = express();
-const server = http.createServer(app);
-
-// Socket.io avec config prod
-const io = new Server(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"],
-  },
-  transports: ["websocket"],
-});
+app.set("trust proxy", 1);
 
 app.use(cors());
 app.use(express.json());
 app.use(express.static(__dirname));
 
-// IMPORTANT pour Railway
-const PORT = process.env.PORT || 8080;
-
-// =======================
-// DATABASE (Railway Postgres)
-// =======================
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
+/* --------------------------------------------------
+   HEALTH CHECK (Railway friendly)
+-------------------------------------------------- */
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    time: new Date().toISOString(),
+    env: process.env.NODE_ENV || "production"
+  });
 });
 
-// =======================
-// OPENAI
-// =======================
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
-// =======================
-// ROUTE
-// =======================
-
+/* --------------------------------------------------
+   ROOT
+-------------------------------------------------- */
 app.get("/", (req, res) => {
-  res.sendFile(__dirname + "/index.html");
+  res.sendFile(path.join(__dirname, "index.html"));
 });
 
-// =======================
-// SOCKET.IO
-// =======================
+/* --------------------------------------------------
+   SOCKET.IO
+-------------------------------------------------- */
+const server = http.createServer(app);
+
+const io = new Server(server, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"]
+  }
+});
+
+const presence = new Map(); // project -> Map(socketId -> username)
+
+function cleanStr(v) {
+  return String(v ?? "").trim();
+}
+
+function getProjectUsers(project) {
+  const m = presence.get(project);
+  if (!m) return [];
+  return Array.from(m.values()).filter(Boolean);
+}
+
+function emitPresence(project) {
+  io.to(project).emit("presenceUpdate", {
+    project,
+    users: getProjectUsers(project)
+  });
+}
+
+function emitSystem(project, text) {
+  io.to(project).emit("systemMessage", {
+    id: Date.now(),
+    project,
+    text
+  });
+}
 
 io.on("connection", (socket) => {
-  console.log("User connected:", socket.id);
+  console.log("Socket connected:", socket.id);
 
-  socket.on("chatMessage", async (data) => {
-    try {
-      const { username, message } = data;
+  socket.on("joinProject", ({ project, username }) => {
+    const p = cleanStr(project);
+    const u = cleanStr(username) || "Anonyme";
+    if (!p) return;
 
-      if (!message) return;
+    socket.join(p);
 
-      // Affiche message utilisateur à tous
-      io.emit("chatMessage", {
-        username,
-        message,
-      });
+    if (!presence.has(p)) presence.set(p, new Map());
+    presence.get(p).set(socket.id, u);
 
-      // Appel OpenAI
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: "You are Sensi, helpful AI assistant.",
-          },
-          {
-            role: "user",
-            content: message,
-          },
-        ],
-      });
+    emitPresence(p);
+    emitSystem(p, `👋 ${u} a rejoint ${p}`);
+  });
 
-      const reply = completion.choices[0].message.content;
+  socket.on("chatMessage", ({ project, username, message }) => {
+    const p = cleanStr(project);
+    const u = cleanStr(username) || "Anonyme";
+    const m = cleanStr(message);
+    if (!p || !m) return;
 
-      // Réponse IA
-      io.emit("chatMessage", {
-        username: "Sensi",
-        message: reply,
-      });
-
-    } catch (err) {
-      console.error("AI Error:", err);
-
-      socket.emit("chatMessage", {
-        username: "SYSTEM",
-        message: "Erreur IA.",
-      });
-    }
+    io.to(p).emit("chatMessage", {
+      id: Date.now(),
+      project: p,
+      username: u,
+      message: m
+    });
   });
 
   socket.on("disconnect", () => {
-    console.log("User disconnected:", socket.id);
+    for (const [proj, map] of presence.entries()) {
+      if (map.has(socket.id)) {
+        map.delete(socket.id);
+        emitPresence(proj);
+      }
+    }
+    console.log("Socket disconnected:", socket.id);
   });
 });
 
-// =======================
-// START
-// =======================
+/* --------------------------------------------------
+   SAFETY (no silent crash)
+-------------------------------------------------- */
+process.on("unhandledRejection", (err) => {
+  console.error("[unhandledRejection]", err);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("[uncaughtException]", err);
+});
+
+process.on("SIGTERM", () => {
+  console.warn("[SIGTERM] shutting down");
+  server.close(() => process.exit(0));
+});
+
+/* --------------------------------------------------
+   START
+-------------------------------------------------- */
+const PORT = process.env.PORT || 3000;
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log("🚀 Server running on port " + PORT);
+  console.log("Server running on", PORT);
 });
