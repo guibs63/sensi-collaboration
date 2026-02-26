@@ -1,56 +1,65 @@
 const express = require("express");
 const cors = require("cors");
 const http = require("http");
+const path = require("path");
 const { Server } = require("socket.io");
 const { Pool } = require("pg");
 const OpenAI = require("openai");
 
 const app = express();
+app.set("trust proxy", 1); // Railway / proxies
+
 const server = http.createServer(app);
 
 const io = new Server(server, {
-  cors: { origin: "*" }
+  cors: { origin: "*", methods: ["GET", "POST", "DELETE"] },
 });
 
+// -----------------------
+// MIDDLEWARES
+// -----------------------
 app.use(cors());
 app.use(express.json());
-app.use(express.static(__dirname));
+
+// Static files (index.html, client.js, etc.)
+app.use(express.static(path.join(__dirname)));
+
+// Fix favicon spam 404
+app.get("/favicon.ico", (req, res) => res.status(204).end());
+
+// Healthcheck Railway (NE PAS utiliser "/")
+app.get("/health", (req, res) => res.status(200).send("OK"));
+
+// Root: serve index.html
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "index.html"));
+});
 
 const PORT = process.env.PORT || 8080;
 
-// =======================
+// -----------------------
 // DATABASE
-// =======================
-
+// -----------------------
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
 });
 
-pool.query("SELECT NOW()")
-  .then(res => console.log("✅ DB CONNECTED:", res.rows[0]))
-  .catch(err => console.error("❌ DB ERROR:", err));
+pool
+  .query("SELECT NOW()")
+  .then((res) => console.log("✅ DB CONNECTED:", res.rows[0]))
+  .catch((err) => console.error("❌ DB ERROR:", err));
 
-// =======================
+// -----------------------
 // OPENAI
-// =======================
-
+// -----------------------
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// =======================
-// HEALTH CHECK (important Railway)
-// =======================
-
-app.get("/", (req, res) => {
-  res.send("🚀 Server is running");
-});
-
-// =======================
+// -----------------------
 // PROJECT CRUD
-// =======================
-
+// -----------------------
 app.get("/projects", async (req, res) => {
   try {
     const result = await pool.query(
@@ -68,10 +77,7 @@ app.post("/projects", async (req, res) => {
   if (!name) return res.status(400).json({ error: "Name required" });
 
   try {
-    await pool.query(
-      "INSERT INTO projects (name) VALUES ($1)",
-      [name.trim()]
-    );
+    await pool.query("INSERT INTO projects (name) VALUES ($1)", [name.trim()]);
     res.json({ success: true });
   } catch (error) {
     console.error("❌ create project error:", error);
@@ -93,19 +99,14 @@ app.delete("/projects/:name", async (req, res) => {
   }
 });
 
-// =======================
+// -----------------------
 // SOFT DELETE MESSAGE
-// =======================
-
+// -----------------------
 app.delete("/messages/:id", async (req, res) => {
   try {
     const { id } = req.params;
 
-    await pool.query(
-      "UPDATE messages SET deleted = TRUE WHERE id = $1",
-      [id]
-    );
-
+    await pool.query("UPDATE messages SET deleted = TRUE WHERE id = $1", [id]);
     res.json({ success: true });
   } catch (error) {
     console.error("❌ delete message error:", error);
@@ -113,12 +114,10 @@ app.delete("/messages/:id", async (req, res) => {
   }
 });
 
-// =======================
+// -----------------------
 // SOCKET.IO
-// =======================
-
+// -----------------------
 io.on("connection", (socket) => {
-
   console.log("🔌 User connected:", socket.id);
 
   socket.on("join project", async ({ project }) => {
@@ -136,9 +135,20 @@ io.on("connection", (socket) => {
       );
 
       socket.emit("chat history", result.rows);
+      socket.emit("stop typing", { project });
     } catch (error) {
       console.error("❌ join project error:", error);
     }
+  });
+
+  socket.on("typing", ({ project }) => {
+    if (!project) return;
+    socket.to(project).emit("typing", { project, username: "Sensi" });
+  });
+
+  socket.on("stop typing", ({ project }) => {
+    if (!project) return;
+    socket.to(project).emit("stop typing", { project });
   });
 
   socket.on("chat message", async (data) => {
@@ -146,7 +156,6 @@ io.on("connection", (socket) => {
     if (!username || !message || !project) return;
 
     try {
-
       // Save user message
       const insertUser = await pool.query(
         "INSERT INTO messages (username, content, project, role) VALUES ($1,$2,$3,$4) RETURNING id",
@@ -162,10 +171,8 @@ io.on("connection", (socket) => {
         project,
       });
 
-      io.to(project).emit("typing", {
-        username: "Sensi",
-        project,
-      });
+      // show typing only to others (not spamming sender)
+      socket.to(project).emit("typing", { project, username: "Sensi" });
 
       // Load last 20 messages
       const history = await pool.query(
@@ -177,38 +184,31 @@ io.on("connection", (socket) => {
         [project]
       );
 
-      const previousMessages = history.rows
-        .reverse()
-        .map(msg => ({
-          role: msg.role,
-          content: msg.content,
-        }));
+      const previousMessages = history.rows.reverse().map((msg) => ({
+        role: msg.role,
+        content: msg.content,
+      }));
 
-      // =======================
-      // OPENAI CALL
-      // =======================
-
+      // OpenAI call
       const completion = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         messages: [
           {
             role: "system",
-            content: `
-You are Sensi, an intelligent collaborative AI assistant.
+            content: `You are Sensi, an intelligent collaborative AI assistant.
 
 You operate inside a multi-project workspace.
 You are NOT restricted to project context unless explicitly requested.
 
-Today's date is ${new Date().toLocaleDateString()}.
-Current project context: ${project}.
-`
+Today's date is ${new Date().toLocaleDateString("fr-FR")}.
+Current project context: ${project}.`,
           },
           ...previousMessages,
-          { role: "user", content: message }
+          { role: "user", content: message },
         ],
       });
 
-      const reply = completion.choices[0].message.content;
+      const reply = completion.choices?.[0]?.message?.content ?? "";
 
       io.to(project).emit("stop typing", { project });
 
@@ -225,11 +225,12 @@ Current project context: ${project}.
         message: reply,
         project,
       });
-
     } catch (error) {
       console.error("❌ OpenAI or DB Error:", error);
 
+      io.to(project).emit("stop typing", { project });
       io.to(project).emit("chat message", {
+        id: Date.now(),
         username: "Sensi",
         message: "⚠️ Une erreur est survenue côté IA.",
         project,
@@ -238,10 +239,9 @@ Current project context: ${project}.
   });
 });
 
-// =======================
+// -----------------------
 // GLOBAL ERROR HANDLER
-// =======================
-
+// -----------------------
 process.on("unhandledRejection", (err) => {
   console.error("❌ Unhandled Rejection:", err);
 });
@@ -250,10 +250,9 @@ process.on("uncaughtException", (err) => {
   console.error("❌ Uncaught Exception:", err);
 });
 
-// =======================
+// -----------------------
 // START SERVER
-// =======================
-
+// -----------------------
 server.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port " + PORT);
 });
