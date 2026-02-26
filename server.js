@@ -119,71 +119,106 @@ io.on("connection", (socket) => {
     const { username, message, project } = data;
     if (!username || !message || !project) return;
 
-    // Save user message
-    const insertUser = await pool.query(
-      "INSERT INTO messages (username, content, project, role) VALUES ($1,$2,$3,$4) RETURNING id",
-      [username, message, project, "user"]
-    );
+    try {
 
-    const userId = insertUser.rows[0].id;
+      // Save user message
+      const insertUser = await pool.query(
+        "INSERT INTO messages (username, content, project, role) VALUES ($1,$2,$3,$4) RETURNING id",
+        [username, message, project, "user"]
+      );
 
-    io.to(project).emit("chat message", {
-      id: userId,
-      username,
-      message,
-      project,
-    });
+      const userId = insertUser.rows[0].id;
 
-    io.to(project).emit("typing", {
-      username: "Sensi",
-      project,
-    });
+      io.to(project).emit("chat message", {
+        id: userId,
+        username,
+        message,
+        project,
+      });
 
-    // Load memory
-    const history = await pool.query(
-      `SELECT role, content
-       FROM messages
-       WHERE project = $1 AND deleted = FALSE
-       ORDER BY created_at DESC
-       LIMIT 20`,
-      [project]
-    );
+      io.to(project).emit("typing", {
+        username: "Sensi",
+        project,
+      });
 
-    const previousMessages = history.rows
-      .reverse()
-      .map(msg => ({
-        role: msg.role,
-        content: msg.content,
-      }));
+      // Load memory
+      const history = await pool.query(
+        `SELECT role, content
+         FROM messages
+         WHERE project = $1 AND deleted = FALSE
+         ORDER BY created_at DESC
+         LIMIT 20`,
+        [project]
+      );
 
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content: `You are Sensi, AI assistant for project ${project}.`,
-        },
-        ...previousMessages,
-      ],
-    });
+      const previousMessages = history.rows
+        .reverse()
+        .map(msg => ({
+          role: msg.role,
+          content: msg.content,
+        }));
 
-    const reply = completion.choices[0].message.content;
+      // =======================
+      // OPENAI CALL
+      // =======================
 
-    io.to(project).emit("stop typing", { project });
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `
+You are Sensi, an intelligent collaborative AI assistant.
 
-    const insertAI = await pool.query(
-      "INSERT INTO messages (username, content, project, role) VALUES ($1,$2,$3,$4) RETURNING id",
-      ["Sensi", reply, project, "assistant"]
-    );
+You operate inside a multi-project workspace.
 
-    const aiId = insertAI.rows[0].id;
+You can:
+- Answer general knowledge questions
+- Help with technical topics
+- Discuss project-related ideas
+- Chat naturally
 
-    io.to(project).emit("chat message", {
-      id: aiId,
-      username: "Sensi",
-      message: reply,
-      project,
-    });
+You are NOT restricted to project context unless explicitly requested.
+
+Today's date is ${new Date().toLocaleDateString()}.
+Current project context: ${project}.
+`
+          },
+          ...previousMessages,
+          {
+            role: "user",
+            content: message
+          }
+        ],
+      });
+
+      const reply = completion.choices[0].message.content;
+
+      io.to(project).emit("stop typing", { project });
+
+      const insertAI = await pool.query(
+        "INSERT INTO messages (username, content, project, role) VALUES ($1,$2,$3,$4) RETURNING id",
+        ["Sensi", reply, project, "assistant"]
+      );
+
+      const aiId = insertAI.rows[0].id;
+
+      io.to(project).emit("chat message", {
+        id: aiId,
+        username: "Sensi",
+        message: reply,
+        project,
+      });
+
+    } catch (error) {
+      console.error("❌ OpenAI Error:", error);
+
+      io.to(project).emit("chat message", {
+        username: "Sensi",
+        message: "⚠️ Désolée, une erreur est survenue côté IA.",
+        project,
+      });
+    }
   });
 });
 
