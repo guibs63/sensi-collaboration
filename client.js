@@ -1,4 +1,5 @@
-// guibs:/client.js (COMPLET)
+// guibs:/client.js (COMPLET) — adapté (robustesse + compat /projects + UX)
+// ✅ gère /projects en {ok:true, projects:[...]} OU en [...]
 const socket = io(window.location.origin, { transports: ["websocket"] });
 
 let currentProject = null;
@@ -247,6 +248,7 @@ deleteProjectBtn.addEventListener("click", () => {
 
 /* upload */
 async function uploadFile(file) {
+  if (!currentProject) throw new Error("Aucun projet rejoint.");
   const fd = new FormData();
   fd.append("file", file);
   fd.append("project", currentProject);
@@ -254,8 +256,8 @@ async function uploadFile(file) {
   fd.append("userId", myUserId);
 
   const res = await fetch("/upload", { method: "POST", body: fd });
-  const data = await res.json();
-  if (!data.ok) throw new Error(data.error || "Upload failed");
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) throw new Error(data.error || `Upload failed (${res.status})`);
   return data;
 }
 
@@ -271,9 +273,10 @@ form.addEventListener("submit", async (e) => {
   const file = fileInput?.files?.[0];
 
   try {
+    const submitBtn = form.querySelector("button[type=submit]");
     if (file) {
       uploadState.textContent = `Upload "${file.name}"...`;
-      form.querySelector("button[type=submit]").disabled = true;
+      if (submitBtn) submitBtn.disabled = true;
       await uploadFile(file);
       uploadState.textContent = "Upload OK ✅ (analyse Sensi en cours…)";
       fileInput.value = "";
@@ -299,7 +302,8 @@ form.addEventListener("submit", async (e) => {
     alert(`Erreur: ${err.message}`);
     uploadState.textContent = "";
   } finally {
-    form.querySelector("button[type=submit]").disabled = false;
+    const submitBtn = form.querySelector("button[type=submit]");
+    if (submitBtn) submitBtn.disabled = false;
   }
 });
 
@@ -315,7 +319,8 @@ socket.on("chatHistory", (payload) => {
 
   for (const m of msgs) {
     addMessage({
-      id: m.id, ts: m.ts,
+      id: m.id,
+      ts: m.ts,
       username: m.username,
       userId: m.userId,
       message: m.message,
@@ -329,7 +334,8 @@ socket.on("chatMessage", (data) => {
   if (currentProject && p && p !== currentProject) return;
 
   addMessage({
-    id: data?.id, ts: data?.ts,
+    id: data?.id,
+    ts: data?.ts,
     username: data?.username,
     userId: data?.userId,
     message: data?.message,
@@ -383,9 +389,28 @@ socket.on("projectDeleted", ({ project }) => {
 
 socket.on("projectError", (payload) => alert(payload?.message || "Erreur projet"));
 
-socket.on("connect", () => {
+socket.on("connect", async () => {
   console.log("✅ Connecté Socket.io", socket.id);
+
+  // ✅ compatible avec ton /projects qui renvoie {ok:true, projects:[...]}
+  try {
+    const res = await fetch("/projects");
+    const data = await res.json().catch(() => ({}));
+
+    // accepte: { ok:true, projects:[...] } OU directement [...]
+    const list =
+      Array.isArray(data) ? data :
+      Array.isArray(data?.projects) ? data.projects :
+      [];
+
+    if (list.length > 0) setProjectsOptions(list, true);
+  } catch (_) {
+    // fallback socket
+    socket.emit("getProjects");
+  }
+
   socket.emit("getProjects");
 });
+
 socket.on("disconnect", () => addSystem("Déconnecté du serveur…"));
 socket.on("connect_error", (err) => addSystem(`Erreur connexion: ${err.message}`));
