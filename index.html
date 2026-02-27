@@ -1,114 +1,82 @@
+<!-- guibs:/index.html (complet : projets dynamiques + users en ligne) -->
 <!DOCTYPE html>
 <html lang="fr">
 <head>
   <meta charset="UTF-8" />
-  <title>Lietome Live 🚀</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sensi - travail collaboratif 🚀</title>
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      margin: 20px;
-    }
+    body{ font-family: Arial, sans-serif; margin:20px; max-width:1100px; }
+    h1{ margin-bottom: 10px; }
+    input, select, button{ padding:8px; font-size:14px; }
+    button{ cursor:pointer; }
+    .topbar{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
+    .hint{ color:#666; font-size:12px; margin:6px 0 12px; }
+    .layout{ display:grid; grid-template-columns:1fr 260px; gap:12px; align-items:start; }
+    @media (max-width: 900px){ .layout{ grid-template-columns:1fr; } }
+    #chat{ border:1px solid #ccc; height:460px; overflow-y:auto; padding:10px; background:#fff; }
+    .msg{ margin-bottom:8px; line-height:1.35; word-break:break-word; }
+    .msg .time{ color:#666; margin-right:6px; font-size:12px; }
+    .msg.system{ color:#444; opacity:0.9; }
+    form#chat-form{ display:flex; gap:8px; align-items:center; margin-top:12px; }
+    #message{ flex:1; min-width:220px; }
 
-    #chat {
-      border: 1px solid #ccc;
-      height: 400px;
-      overflow-y: auto;
-      padding: 10px;
-      margin-bottom: 10px;
-    }
+    .panel{ border:1px solid #ccc; background:#fff; padding:10px; }
+    .panel h3{ margin:0 0 8px 0; font-size:15px; }
+    .badge{ display:inline-block; padding:2px 8px; border:1px solid #ddd; border-radius:999px; font-size:12px; color:#444; margin-left:6px; }
+    #users{ list-style:none; padding:0; margin:0; }
+    #users li{ padding:6px 8px; border-bottom:1px solid #f0f0f0; display:flex; justify-content:space-between; gap:8px; align-items:center; }
+    #users li:last-child{ border-bottom:none; }
+    .dot{ width:8px; height:8px; border-radius:50%; background:#22c55e; display:inline-block; margin-right:8px; }
+    .userline{ display:flex; align-items:center; gap:6px; min-width:0; }
+    .uname{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:170px; display:inline-block; }
 
-    #chat div {
-      margin-bottom: 5px;
-    }
-
-    input, select, button {
-      padding: 5px;
-      margin-right: 5px;
-    }
+    .danger{ border:1px solid #f2b8b5; background:#fff5f5; }
   </style>
 </head>
+
 <body>
+  <h1>Sensi - travail collaboratif 🚀</h1>
 
-  <h1>Lietome Live 🚀</h1>
+  <div class="topbar">
+    <input type="text" id="username" placeholder="Pseudo" autocomplete="nickname" />
 
-  <input type="text" id="username" placeholder="Pseudo" />
-  
-  <select id="project">
-    <option value="Ever">Ever</option>
-    <option value="Tintin">Tintin</option>
-    <option value="Sensi">Sensi</option>
-  </select>
+    <select id="project"></select>
 
-  <button onclick="joinProject()">Rejoindre</button>
+    <button id="join-btn" type="button">Rejoindre</button>
+  </div>
 
-  <hr>
+  <div class="topbar">
+    <input type="text" id="new-project" placeholder="Nouveau projet (ex: EverCell)" />
+    <button id="create-project-btn" type="button">+ Créer</button>
 
-  <div id="chat"></div>
+    <button id="delete-project-btn" type="button" class="danger">🗑️ Supprimer ce projet</button>
+  </div>
 
-  <form id="chat-form">
-    <input type="text" id="message" placeholder="Message..." autocomplete="off" />
-    <button type="submit">Envoyer</button>
-  </form>
+  <div class="hint">
+    Projets synchronisés en temps réel (création/suppression). Messages persistants par projet + users en ligne.
+  </div>
 
-  <!-- ✅ CDN officiel socket.io -->
-  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <div class="layout">
+    <div>
+      <div id="chat" aria-live="polite"></div>
 
-  <script>
-    const socket = io();
+      <form id="chat-form" autocomplete="off">
+        <input type="text" id="message" placeholder="Message..." autocomplete="off" />
+        <button type="submit">Envoyer</button>
+      </form>
+    </div>
 
-    let currentProject = null;
+    <aside class="panel">
+      <h3>Users en ligne <span class="badge" id="users-count">0</span></h3>
+      <div class="hint" style="margin:0 0 8px;">
+        Projet : <strong id="current-project-label">—</strong>
+      </div>
+      <ul id="users"></ul>
+    </aside>
+  </div>
 
-    const chat = document.getElementById("chat");
-    const form = document.getElementById("chat-form");
-    const input = document.getElementById("message");
-    const usernameInput = document.getElementById("username");
-    const projectSelect = document.getElementById("project");
-
-    function addMessage(username, message) {
-      const div = document.createElement("div");
-      div.innerHTML = "<strong>" + username + ":</strong> " + message;
-      chat.appendChild(div);
-      chat.scrollTop = chat.scrollHeight;
-    }
-
-    function joinProject() {
-      const username = usernameInput.value.trim();
-      const project = projectSelect.value;
-
-      if (!username) {
-        alert("Entre un pseudo");
-        return;
-      }
-
-      currentProject = project;
-      socket.emit("joinProject", { username, project });
-
-      addMessage("SYSTEM", "Connecté au projet " + project);
-    }
-
-    form.addEventListener("submit", function (e) {
-      e.preventDefault();
-
-      const message = input.value.trim();
-      const username = usernameInput.value.trim();
-
-      if (!message || !currentProject) return;
-
-      socket.emit("chatMessage", {
-        username,
-        message,
-        project: currentProject
-      });
-
-      input.value = "";
-    });
-
-    socket.on("chatMessage", function (data) {
-      if (data.project === currentProject) {
-        addMessage(data.username, data.message);
-      }
-    });
-  </script>
-
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/client.js"></script>
 </body>
 </html>
