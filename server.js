@@ -1,4 +1,4 @@
-// guibs:/server.js (COMPLET) — dynamic-projects-v6-auto-web (fix OpenAI tools format)
+// guibs:/server.js (COMPLET) — Sensi auto + Serper web + mémoire intelligente (GLOBAL + par PROJET)
 "use strict";
 
 const express = require("express");
@@ -11,13 +11,13 @@ const multer = require("multer");
 const { Server } = require("socket.io");
 
 let OpenAI = null;
-try {
-  OpenAI = require("openai");
-} catch (_) {}
+try { OpenAI = require("openai"); } catch (_) {}
 
+/* ==================================================
+   APP INIT
+================================================== */
 const app = express();
 app.set("trust proxy", 1);
-
 app.use(cors());
 app.use(express.json());
 app.use(express.static(__dirname));
@@ -25,10 +25,16 @@ app.use(express.static(__dirname));
 /* ==================================================
    CONFIG
 ================================================== */
-const APP_VERSION = process.env.APP_VERSION || "dynamic-projects-v6-auto-web";
+const APP_VERSION = process.env.APP_VERSION || "dynamic-projects-v9-global-memory";
+
 const STORAGE_DIR = path.join(__dirname, "storage");
 const HISTORY_FILE = path.join(STORAGE_DIR, "messages.json");
 const PROJECTS_FILE = path.join(STORAGE_DIR, "projects.json");
+
+// Memory files
+const MEMORY_PROJECT_FILE = path.join(STORAGE_DIR, "memory.json");         // { [project]: MemoryItem[] }
+const MEMORY_GLOBAL_FILE  = path.join(STORAGE_DIR, "memory_global.json");  // MemoryItem[]
+
 const UPLOADS_DIR = path.join(__dirname, "uploads");
 
 const MAX_MESSAGES_PER_PROJECT = Number(process.env.MAX_MESSAGES_PER_PROJECT || 200);
@@ -39,7 +45,7 @@ const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || "";
 
-// Web search provider (optionnel)
+// Web (Serper)
 const SERPER_API_KEY = process.env.SERPER_API_KEY || "";
 const SERPER_ENDPOINT = "https://google.serper.dev/search";
 
@@ -47,20 +53,29 @@ const SERPER_ENDPOINT = "https://google.serper.dev/search";
    INIT DIRS
 ================================================== */
 function ensureDirs() {
-  if (!fs.existsSync(STORAGE_DIR)) fs.mkdirSync(STORAGE_DIR, { recursive: true });
-  if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-  if (!fs.existsSync(HISTORY_FILE)) fs.writeFileSync(HISTORY_FILE, JSON.stringify({}, null, 2), "utf8");
-  if (!fs.existsSync(PROJECTS_FILE)) fs.writeFileSync(PROJECTS_FILE, JSON.stringify(["Ever"], null, 2), "utf8");
+  try {
+    if (!fs.existsSync(STORAGE_DIR)) fs.mkdirSync(STORAGE_DIR, { recursive: true });
+    if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+
+    if (!fs.existsSync(HISTORY_FILE)) fs.writeFileSync(HISTORY_FILE, JSON.stringify({}, null, 2), "utf8");
+    if (!fs.existsSync(PROJECTS_FILE)) fs.writeFileSync(PROJECTS_FILE, JSON.stringify(["Ever"], null, 2), "utf8");
+
+    if (!fs.existsSync(MEMORY_PROJECT_FILE)) fs.writeFileSync(MEMORY_PROJECT_FILE, JSON.stringify({}, null, 2), "utf8");
+    if (!fs.existsSync(MEMORY_GLOBAL_FILE)) fs.writeFileSync(MEMORY_GLOBAL_FILE, JSON.stringify([], null, 2), "utf8");
+  } catch (e) {
+    console.error("[init] ensureDirs failed:", e);
+  }
 }
-try { ensureDirs(); } catch (e) { console.error("[init] ensureDirs failed:", e); }
+ensureDirs();
 
 app.use("/uploads", express.static(UPLOADS_DIR));
 
 /* ==================================================
-   STORAGE
+   STORAGE HELPERS
 ================================================== */
 function readJSON(file, fallback) {
-  try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; }
+  try { return JSON.parse(fs.readFileSync(file, "utf8")); }
+  catch { return fallback; }
 }
 function writeJSON(file, data) {
   try { fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8"); }
@@ -69,32 +84,51 @@ function writeJSON(file, data) {
 
 let historyByProject = readJSON(HISTORY_FILE, {});
 let projects = readJSON(PROJECTS_FILE, ["Ever"]);
+
+// Memory
+let memoryByProject = readJSON(MEMORY_PROJECT_FILE, {});   // { [project]: MemoryItem[] }
+let memoryGlobal = readJSON(MEMORY_GLOBAL_FILE, []);       // MemoryItem[]
+
 if (!Array.isArray(projects) || projects.length === 0) projects = ["Ever"];
 projects = Array.from(new Set(projects.map((p) => String(p || "").trim()).filter(Boolean)));
 if (projects.length === 0) projects = ["Ever"];
 
 function cleanStr(v) { return String(v ?? "").trim(); }
-function safeProjectKey(project) {
-  const p = cleanStr(project);
-  return p ? p.slice(0, 80) : "";
-}
+function safeProjectKey(project) { const p = cleanStr(project); return p ? p.slice(0, 80) : ""; }
 function isValidProjectName(name) { return /^[a-zA-Z0-9 _.\-]{2,50}$/.test(name); }
 function listProjects() { return projects.slice().sort((a, b) => a.localeCompare(b, "fr")); }
+
+function hasOpenAI() { return Boolean(OpenAI && process.env.OPENAI_API_KEY); }
+function hasWeb() { return Boolean(SERPER_API_KEY); }
+
 function saveProjects() { writeJSON(PROJECTS_FILE, projects); }
 function saveHistoryNow() { writeJSON(HISTORY_FILE, historyByProject); }
+function saveMemoryProjectNow() { writeJSON(MEMORY_PROJECT_FILE, memoryByProject); }
+function saveMemoryGlobalNow() { writeJSON(MEMORY_GLOBAL_FILE, memoryGlobal); }
 
 let saveTimer = null;
 function scheduleHistorySave() {
   if (saveTimer) return;
-  saveTimer = setTimeout(() => {
-    saveTimer = null;
-    saveHistoryNow();
-  }, 400);
+  saveTimer = setTimeout(() => { saveTimer = null; saveHistoryNow(); }, 400);
 }
 
+let memProjSaveTimer = null;
+function scheduleMemoryProjectSave() {
+  if (memProjSaveTimer) return;
+  memProjSaveTimer = setTimeout(() => { memProjSaveTimer = null; saveMemoryProjectNow(); }, 400);
+}
+
+let memGlobalSaveTimer = null;
+function scheduleMemoryGlobalSave() {
+  if (memGlobalSaveTimer) return;
+  memGlobalSaveTimer = setTimeout(() => { memGlobalSaveTimer = null; saveMemoryGlobalNow(); }, 400);
+}
+
+/* ==================================================
+   HISTORY
+================================================== */
 function getHistory(project) {
   const p = safeProjectKey(project);
-  if (!p) return [];
   const arr = historyByProject[p];
   return Array.isArray(arr) ? arr : [];
 }
@@ -110,10 +144,8 @@ function pushMessage(project, msgObj) {
   scheduleHistorySave();
 }
 
-// author-only delete
 function deleteMessageIfAuthor(project, messageId, requesterUserId) {
   const p = safeProjectKey(project);
-  if (!p) return { ok: false, reason: "bad_project" };
   if (!Array.isArray(historyByProject[p])) return { ok: false, reason: "no_history" };
 
   const idNum = Number(messageId);
@@ -135,11 +167,129 @@ function deleteMessageIfAuthor(project, messageId, requesterUserId) {
 }
 
 /* ==================================================
-   HEALTH + ROUTES
+   MEMORY (GLOBAL + PROJECT)
 ================================================== */
-function hasOpenAI() { return Boolean(OpenAI && process.env.OPENAI_API_KEY); }
-function hasWeb() { return Boolean(SERPER_API_KEY); }
+/**
+ * MemoryItem = {
+ *   id: string,
+ *   ts: number,
+ *   text: string,
+ *   type: "person"|"relationship"|"preference"|"project"|"fact"|"other",
+ *   confidence: number, // 0..1
+ *   scope: "global"|"project",
+ *   project?: string,
+ *   authorUserId: string,
+ *   authorName: string
+ * }
+ */
+function normalizeMemoryText(t) {
+  return cleanStr(t)
+    .replace(/\s+/g, " ")
+    .replace(/[“”]/g, '"')
+    .slice(0, 240);
+}
 
+function getProjectMemory(project) {
+  const p = safeProjectKey(project);
+  const arr = memoryByProject[p];
+  return Array.isArray(arr) ? arr : [];
+}
+function getGlobalMemory() {
+  return Array.isArray(memoryGlobal) ? memoryGlobal : [];
+}
+
+function addMemoryItem(scope, project, item) {
+  const txt = normalizeMemoryText(item?.text);
+  if (!txt) return { ok: false, reason: "empty" };
+
+  const mem = {
+    id: crypto.randomBytes(10).toString("hex"),
+    ts: Date.now(),
+    text: txt,
+    type: cleanStr(item?.type) || "fact",
+    confidence: Number.isFinite(Number(item?.confidence)) ? Math.max(0, Math.min(1, Number(item.confidence))) : 0.75,
+    scope,
+    project: scope === "project" ? safeProjectKey(project) : undefined,
+    authorUserId: cleanStr(item?.authorUserId) || "",
+    authorName: cleanStr(item?.authorName) || "",
+  };
+
+  if (scope === "global") {
+    if (!Array.isArray(memoryGlobal)) memoryGlobal = [];
+    const exists = memoryGlobal.some((x) => normalizeMemoryText(x?.text) === txt);
+    if (exists) return { ok: true, dedup: true };
+    memoryGlobal.push(mem);
+    if (memoryGlobal.length > 400) memoryGlobal = memoryGlobal.slice(-400);
+    scheduleMemoryGlobalSave();
+    return { ok: true, mem };
+  }
+
+  // project
+  const p = safeProjectKey(project);
+  if (!p) return { ok: false, reason: "bad_project" };
+
+  if (!Array.isArray(memoryByProject[p])) memoryByProject[p] = [];
+  const arr = memoryByProject[p];
+  const exists = arr.some((x) => normalizeMemoryText(x?.text) === txt);
+  if (exists) return { ok: true, dedup: true };
+
+  arr.push(mem);
+  if (arr.length > 250) memoryByProject[p] = arr.slice(-250);
+  scheduleMemoryProjectSave();
+  return { ok: true, mem };
+}
+
+function clearProjectMemory(project) {
+  const p = safeProjectKey(project);
+  if (!p) return false;
+  memoryByProject[p] = [];
+  scheduleMemoryProjectSave();
+  return true;
+}
+function clearGlobalMemory() {
+  memoryGlobal = [];
+  scheduleMemoryGlobalSave();
+  return true;
+}
+
+function forgetMemoryByQuery(scope, project, query) {
+  const q = cleanStr(query).toLowerCase();
+  if (!q) return { ok: false, removed: 0 };
+
+  if (scope === "global") {
+    const before = getGlobalMemory().length;
+    memoryGlobal = getGlobalMemory().filter((m) => !String(m?.text || "").toLowerCase().includes(q));
+    const removed = before - memoryGlobal.length;
+    if (removed > 0) scheduleMemoryGlobalSave();
+    return { ok: true, removed };
+  }
+
+  const p = safeProjectKey(project);
+  const before = getProjectMemory(p).length;
+  memoryByProject[p] = getProjectMemory(p).filter((m) => !String(m?.text || "").toLowerCase().includes(q));
+  const removed = before - memoryByProject[p].length;
+  if (removed > 0) scheduleMemoryProjectSave();
+  return { ok: true, removed };
+}
+
+function formatMemoryForPrompt(project) {
+  const global = getGlobalMemory().slice(-35);
+  const proj = getProjectMemory(project).slice(-35);
+
+  const gTxt = global.length
+    ? global.map((m) => `- (global, ${m.type}, conf ${Math.round((m.confidence || 0) * 100)}%) ${m.text}`).join("\n")
+    : "(vide)";
+
+  const pTxt = proj.length
+    ? proj.map((m) => `- (projet, ${m.type}, conf ${Math.round((m.confidence || 0) * 100)}%) ${m.text}`).join("\n")
+    : "(vide)";
+
+  return { gTxt, pTxt };
+}
+
+/* ==================================================
+   ROUTES
+================================================== */
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
@@ -155,7 +305,7 @@ app.get("/", (req, res) => res.sendFile(path.join(__dirname, "index.html")));
 app.get("/projects", (req, res) => res.json({ ok: true, projects: listProjects() }));
 
 /* ==================================================
-   SOCKET.IO INIT (server + io)
+   SOCKET.IO INIT
 ================================================== */
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
@@ -190,13 +340,9 @@ const upload = multer({
     if (allowedExt.has(ext)) return cb(null, true);
 
     const allowedMime = new Set([
-      "image/png",
-      "image/jpeg",
-      "image/webp",
+      "image/png","image/jpeg","image/webp",
       "application/pdf",
-      "text/plain",
-      "text/markdown",
-      "text/csv",
+      "text/plain","text/markdown","text/csv",
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ]);
@@ -249,7 +395,6 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
     io.to(project).emit("chatMessage", msg);
 
-    // analyse fichier par Sensi (optionnel)
     analyzeFileWithSensi({ project, username, attachment }).catch((e) => console.error("[sensi-file]", e));
 
     res.json({ ok: true, project, attachment });
@@ -260,7 +405,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 });
 
 /* ==================================================
-   SENSI - EMIT HELPERS
+   EMIT HELPERS
 ================================================== */
 function emitSensi(project, text, meta = {}) {
   const msg = {
@@ -269,7 +414,7 @@ function emitSensi(project, text, meta = {}) {
     project,
     username: "Sensi",
     userId: "sensi",
-    message: text,
+    message: String(text || ""),
     meta,
   };
 
@@ -285,8 +430,12 @@ function emitSensi(project, text, meta = {}) {
   io.to(project).emit("chatMessage", msg);
 }
 
+function emitSystem(project, text) {
+  io.to(project).emit("systemMessage", { id: Date.now(), ts: Date.now(), project, text });
+}
+
 /* ==================================================
-   WEB SEARCH (Serper) — optionnel
+   WEB (Serper)
 ================================================== */
 async function serperSearch(query, num = 6) {
   if (!SERPER_API_KEY) throw new Error("SERPER_API_KEY missing");
@@ -305,129 +454,301 @@ async function serperSearch(query, num = 6) {
   }
 
   const data = await resp.json();
-  const items = [];
-  for (const r of (data?.organic || []).slice(0, num)) {
-    items.push({
-      title: r.title || "",
-      link: r.link || "",
-      snippet: r.snippet || "",
-      source: "organic",
-    });
-  }
-  return items;
+  return (data?.organic || []).slice(0, num).map((r) => ({
+    title: r.title || "",
+    link: r.link || "",
+    snippet: r.snippet || "",
+  }));
+}
+
+function formatSearchResults(results) {
+  if (!results || results.length === 0) return "Aucun résultat.";
+  return results
+    .map((r, i) => {
+      const t = cleanStr(r.title) || "Sans titre";
+      const l = cleanStr(r.link);
+      const s = cleanStr(r.snippet);
+      return `${i + 1}. ${t}\nURL: ${l}\nRésumé: ${s}`;
+    })
+    .join("\n\n");
+}
+
+function mightNeedWeb(userText) {
+  const t = cleanStr(userText).toLowerCase();
+  if (!t) return false;
+  const triggers = [
+    "aujourd", "hier", "demain", "en ce moment", "actu", "news",
+    "prix", "cours", "taux", "météo", "élection", "président",
+    "date", "horaire", "heure", "source", "site officiel", "lien"
+  ];
+  if (triggers.some((k) => t.includes(k))) return true;
+  if (t.startsWith("cherche ") || t.startsWith("recherche ") || t.includes("google")) return true;
+  return false;
 }
 
 /* ==================================================
-   SENSI - AUTO (OpenAI Responses) — FIXED TOOLS FORMAT
+   OPENAI (simple, no tools/tool_outputs)
 ================================================== */
-function extractFunctionCalls(resp) {
-  const out = Array.isArray(resp?.output) ? resp.output : [];
-  return out.filter((item) => item && item.type === "function_call");
+async function openaiText({ system, user, maxTokens = 520 }) {
+  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const resp = await client.responses.create({
+    model: OPENAI_MODEL,
+    input: [
+      { role: "system", content: [{ type: "input_text", text: system }] },
+      { role: "user", content: [{ type: "input_text", text: user }] },
+    ],
+    max_output_tokens: maxTokens,
+  });
+  return cleanStr(resp.output_text || "");
 }
 
-async function sensiRespondToUserMessage({ project, username, userText }) {
+/* ==================================================
+   FORCED MEMO PARSING (GLOBAL by default)
+   - "mémorise : ..." => global
+   - "mémorise projet : ..." => project
+================================================== */
+function extractForcedMemo(userText) {
+  const t = cleanStr(userText);
+  if (!t) return { scope: "", text: "" };
+
+  const mProj = t.match(/^\s*(m[ée]morise|memo|note)\s+projet\s*[:\-]\s*(.+)$/i);
+  if (mProj && mProj[2]) return { scope: "project", text: cleanStr(mProj[2]) };
+
+  const m1 = t.match(/^\s*(m[ée]morise|memo|note)\s*[:\-]\s*(.+)$/i);
+  if (m1 && m1[2]) return { scope: "global", text: cleanStr(m1[2]) };
+
+  const m2 = t.match(/^\s*(m[ée]morise|memo|note)\s+que\s+(.+)$/i);
+  if (m2 && m2[2]) return { scope: "global", text: cleanStr(m2[2]) };
+
+  return { scope: "", text: "" };
+}
+
+/* ==================================================
+   INTELLIGENT MEMORY EXTRACTION
+================================================== */
+async function sensiExtractMemories({ project, username, userId, userText }) {
+  if (!hasOpenAI()) return { memories: [], ack: "" };
+
+  const { gTxt, pTxt } = formatMemoryForPrompt(project);
+
+  const system = `
+Tu es un extracteur de mémoire pour un chat collaboratif.
+Décide si le message contient des informations DURABLES et UTILES à mémoriser.
+
+Règles:
+- Mémorise des faits stables: relations ("X est mon épouse"), identités, préférences durables, contexte important, contraintes/decisions.
+- Ne mémorise PAS: humeur, small talk, questions ponctuelles, info éphémère.
+- Choisis un scope:
+  - "global" si c'est vrai pour l'utilisateur en général (ex: "Mel est mon épouse")
+  - "project" si c'est spécifique au projet (ex: "dans EverCell, on vise TRL3")
+- Réponds STRICTEMENT en JSON entre <json>...</json>.
+
+Format:
+{
+  "memories":[
+    {"text":"...", "type":"person|relationship|preference|project|fact|other", "confidence":0.0-1.0, "scope":"global|project"}
+  ],
+  "ack":"(si demande explicite de mémorisation: courte phrase, sinon vide)"
+}
+
+Mémoire actuelle (global):
+${gTxt}
+
+Mémoire actuelle (projet "${project}"):
+${pTxt}
+`.trim();
+
+  const user = `Projet: ${project}\nAuteur: ${username} (${userId})\nMessage: ${userText}`;
+
+  const out = await openaiText({ system, user, maxTokens: 380 });
+  const m = out.match(/<json>\s*([\s\S]+?)\s*<\/json>/i);
+  if (!m) return { memories: [], ack: "" };
+
+  try {
+    const parsed = JSON.parse(m[1]);
+    const memories = Array.isArray(parsed?.memories) ? parsed.memories : [];
+    const ack = cleanStr(parsed?.ack);
+    return { memories, ack };
+  } catch {
+    return { memories: [], ack: "" };
+  }
+}
+
+/* ==================================================
+   SENSI MAIN
+================================================== */
+async function sensiRespondToUserMessage({ project, username, userId, userText }) {
   if (!hasOpenAI()) {
     emitSensi(project, "ℹ️ IA non configurée (OPENAI_API_KEY manquante).");
     return;
   }
 
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const p = safeProjectKey(project);
+  const t = cleanStr(userText);
+  const low = t.toLowerCase();
 
-  // ✅ Responses API tools format: {type:"function", name, description, parameters}
-  const tools = [
-    {
-      type: "function",
-      name: "web_search",
-      description:
-        "Recherche sur le web des informations à jour (actualités, faits récents, pages officielles). " +
-        "Utiliser seulement si nécessaire pour répondre correctement.",
-      parameters: {
-        type: "object",
-        properties: {
-          query: { type: "string", description: "Requête de recherche web." },
-          num: { type: "integer", description: "Nombre de résultats (max 8).", default: 6 },
-        },
-        required: ["query"],
-      },
-    },
-  ];
+  // Commands
+  if (low === "/memos" || low === "/memos global" || low === "/memos project") {
+    const showGlobal = (low === "/memos" || low === "/memos global");
+    const showProject = (low === "/memos" || low === "/memos project");
 
-  const system = `
-Tu es Sensi, IA d'assistance au travail collaboratif.
-Règle clé: si la question nécessite des infos récentes ou spécifiques non garanties, tu DOIS utiliser l'outil web_search.
-Sinon, répond sans recherche.
-Quand tu utilises le web, cite tes sources sous forme de liste: titre + URL.
-Réponds en français, clair, actionnable, pas de blabla.
-`.trim();
+    let parts = [];
+    if (showGlobal) {
+      const g = getGlobalMemory();
+      parts.push("🧠 MÉMOIRE GLOBALE:");
+      parts.push(g.length ? g.slice(-60).map((m, i) => `${i + 1}. [${m.type}] ${m.text}`).join("\n") : "(vide)");
+    }
+    if (showProject) {
+      const pm = getProjectMemory(p);
+      parts.push(`\n🧠 MÉMOIRE PROJET "${p}":`);
+      parts.push(pm.length ? pm.slice(-60).map((m, i) => `${i + 1}. [${m.type}] ${m.text}`).join("\n") : "(vide)");
+    }
 
-  const userPrompt = `Message de ${username} (projet ${project}) : ${userText}`;
+    return emitSensi(p, parts.join("\n"));
+  }
 
-  // 1) Model decides if it needs web_search
-  let response = await client.responses.create({
-    model: OPENAI_MODEL,
-    input: [
-      { role: "system", content: [{ type: "input_text", text: system }] },
-      { role: "user", content: [{ type: "input_text", text: userPrompt }] },
-    ],
-    tools,
-    tool_choice: "auto",
-    max_output_tokens: 400,
-  });
+  if (low === "/memo clear") {
+    clearProjectMemory(p);
+    return emitSensi(p, `🧠 Mémoire du projet "${p}" effacée ✅`);
+  }
+  if (low === "/memo clear global") {
+    clearGlobalMemory();
+    return emitSensi(p, "🧠 Mémoire globale effacée ✅");
+  }
 
-  const calls = extractFunctionCalls(response);
+  if (low.startsWith("/memo forget global ")) {
+    const q = t.slice("/memo forget global ".length);
+    const res = forgetMemoryByQuery("global", p, q);
+    return emitSensi(p, `🧠 Oubli global : ${res.removed} entrée(s) supprimée(s) ✅`);
+  }
+  if (low.startsWith("/memo forget ")) {
+    const q = t.slice("/memo forget ".length);
+    const res = forgetMemoryByQuery("project", p, q);
+    return emitSensi(p, `🧠 Oubli projet : ${res.removed} entrée(s) supprimée(s) ✅`);
+  }
 
-  // direct answer (no tool)
-  if (!calls.length) {
-    const out = (response.output_text || "").trim();
-    if (out) emitSensi(project, out);
+  // 1) Forced memo (global default)
+  const forced = extractForcedMemo(t);
+  if (forced.text) {
+    // Try LLM classification for type/confidence, but keep forced scope
+    try {
+      const ex = await sensiExtractMemories({
+        project: p,
+        username,
+        userId,
+        userText: `mémorise: ${forced.text}`,
+      });
+
+      const items = (ex.memories || []).length
+        ? ex.memories
+        : [{ text: forced.text, type: "fact", confidence: 0.9, scope: forced.scope || "global" }];
+
+      for (const it of items) {
+        const scope = (forced.scope || it.scope || "global") === "project" ? "project" : "global";
+        addMemoryItem(scope, p, {
+          text: it.text,
+          type: it.type,
+          confidence: it.confidence,
+          authorUserId: userId,
+          authorName: username,
+        });
+      }
+
+      emitSensi(p, ex.ack || `🧠 OK, je mémorise (${forced.scope || "global"}) : "${forced.text}"`);
+    } catch {
+      const scope = forced.scope || "global";
+      addMemoryItem(scope === "project" ? "project" : "global", p, {
+        text: forced.text,
+        type: "fact",
+        confidence: 0.85,
+        authorUserId: userId,
+        authorName: username,
+      });
+      emitSensi(p, `🧠 OK, je mémorise (${scope}) : "${forced.text}"`);
+    }
     return;
   }
 
-  // execute tool calls
-  const tool_outputs = [];
-  for (const call of calls) {
-    if (call?.name !== "web_search") continue;
-
-    let args = {};
-    try { args = call?.arguments ? JSON.parse(call.arguments) : {}; } catch { args = {}; }
-
-    if (!hasWeb()) {
-      tool_outputs.push({
-        tool_call_id: call.call_id || call.id,
-        output: JSON.stringify({ error: "Web search disabled (SERPER_API_KEY missing)." }),
+  // 2) Smart memory extraction
+  try {
+    const ex = await sensiExtractMemories({ project: p, username, userId, userText: t });
+    const memories = Array.isArray(ex.memories) ? ex.memories : [];
+    for (const it of memories) {
+      if (!it?.text) continue;
+      const scope = (String(it.scope || "").toLowerCase() === "project") ? "project" : "global";
+      addMemoryItem(scope, p, {
+        text: it.text,
+        type: it.type || "fact",
+        confidence: it.confidence,
+        authorUserId: userId,
+        authorName: username,
       });
-      continue;
     }
-
-    const q = cleanStr(args.query);
-    const n = Math.max(1, Math.min(Number(args.num || 6), 8));
-    const results = await serperSearch(q, n);
-
-    tool_outputs.push({
-      tool_call_id: call.call_id || call.id,
-      output: JSON.stringify({ query: q, results }),
-    });
+    if (ex.ack) emitSensi(p, ex.ack);
+  } catch (e) {
+    console.error("[sensi-memo]", e);
   }
 
-  // 2) Final answer using tool outputs
-  response = await client.responses.create({
-    model: OPENAI_MODEL,
-    input: [
-      { role: "system", content: [{ type: "input_text", text: system }] },
-      { role: "user", content: [{ type: "input_text", text: userPrompt }] },
-    ],
-    tools,
-    tool_choice: "auto",
-    tool_outputs,
-    max_output_tokens: 500,
-  });
+  // 3) Web (heuristic)
+  let webBlock = "";
+  if (hasWeb() && mightNeedWeb(t)) {
+    try {
+      const results = await serperSearch(t, 6);
+      webBlock = `\n\n[WEB RESULTS]\n${formatSearchResults(results)}\n[/WEB RESULTS]\n`;
+    } catch (e) {
+      console.error("[serper]", e);
+      webBlock = `\n\n[WEB RESULTS]\n(Erreur web search)\n[/WEB RESULTS]\n`;
+    }
+  }
 
-  const out = (response.output_text || "").trim();
-  if (out) emitSensi(project, out);
+  // 4) Prompt with memory + recent
+  const mem = formatMemoryForPrompt(p);
+  const recent = getHistory(p).slice(-20);
+  const recentTxt = recent
+    .map((m) => `${cleanStr(m?.username) || "??"}: ${cleanStr(m?.message)}`)
+    .join("\n");
+
+  const system = `
+Tu es Sensi, IA d'assistance au travail collaboratif.
+Tu as accès à une mémoire GLOBALE (partagée entre tous les projets) et une mémoire PROJET (spécifique au projet courant).
+Priorité: si conflit, la mémoire PROJET prime.
+
+Règles:
+- Réponds en français, clair, concret.
+- Utilise la mémoire pour être cohérente et "comprendre" les relations (ex: qui est Mel).
+- Si [WEB RESULTS] est présent, utilise-les et cite les sources (titres + URLs).
+- N'invente pas de mémoires.
+`.trim();
+
+  const user = `
+[PROJET]
+${p}
+[/PROJET]
+
+[MÉMOIRE GLOBALE]
+${mem.gTxt}
+[/MÉMOIRE GLOBALE]
+
+[MÉMOIRE PROJET]
+${mem.pTxt}
+[/MÉMOIRE PROJET]
+
+[CONTEXTE RÉCENT]
+${recentTxt || "(vide)"}
+[/CONTEXTE RÉCENT]
+
+[QUESTION UTILISATEUR]
+${t}
+[/QUESTION UTILISATEUR]
+${webBlock}
+`.trim();
+
+  const answer = await openaiText({ system, user, maxTokens: 620 });
+  if (answer) emitSensi(p, answer);
 }
 
 /* ==================================================
-   SENSI - FILE ANALYSIS (simple)
+   FILE ANALYSIS (simple)
 ================================================== */
 async function extractTextFromFile(localFilePath, mimetype, originalName) {
   const ext = (path.extname(originalName || "") || "").toLowerCase();
@@ -475,8 +796,6 @@ async function analyzeFileWithSensi({ project, username, attachment }) {
     return;
   }
 
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
   const isImage = String(attachment.mimetype || "").startsWith("image/");
   const localPath = path.join(UPLOADS_DIR, attachment.storedAs);
 
@@ -484,34 +803,18 @@ async function analyzeFileWithSensi({ project, username, attachment }) {
   if (!isImage) extracted = await extractTextFromFile(localPath, attachment.mimetype, attachment.filename);
 
   const system = `Tu es Sensi. Analyse le fichier et propose résumé + points clés + actions.`;
+  const user =
+    `Fichier envoyé par "${username}" dans "${project}".\n` +
+    `Nom: ${attachment.filename}\nType: ${attachment.mimetype}\n` +
+    (isImage ? `Image URL: ${attachment.url}` : `Extrait:\n${extracted || "(pas d'extraction dispo)"}`);
 
-  const userParts = [{
-    type: "input_text",
-    text:
-      `Fichier envoyé par "${username}" dans "${project}".\n` +
-      `Nom: ${attachment.filename}\nType: ${attachment.mimetype}\n` +
-      (isImage ? `Image: ${attachment.url}\nAnalyse l'image.` : `Extrait:\n${extracted || "(pas d'extraction dispo)"}`),
-  }];
-
-  if (isImage) userParts.push({ type: "input_image", image_url: attachment.url });
-
-  const resp = await client.responses.create({
-    model: OPENAI_MODEL,
-    input: [
-      { role: "system", content: [{ type: "input_text", text: system }] },
-      { role: "user", content: userParts },
-    ],
-    max_output_tokens: 450,
-  });
-
-  const out = (resp.output_text || "").trim();
+  const out = await openaiText({ system, user, maxTokens: 520 });
   if (out) emitSensi(project, `🧠 Analyse Sensi — ${attachment.filename}\n\n${out}`);
 }
 
 /* ==================================================
    SOCKET.IO
 ================================================== */
-// presence: project -> Map(socketId -> { username, userId })
 const presence = new Map();
 
 function getUsers(project) {
@@ -521,9 +824,6 @@ function getUsers(project) {
 }
 function emitPresence(project) {
   io.to(project).emit("presenceUpdate", { project, users: getUsers(project) });
-}
-function emitSystem(project, text) {
-  io.to(project).emit("systemMessage", { id: Date.now(), ts: Date.now(), project, text });
 }
 function broadcastProjects() {
   io.emit("projectsUpdate", { projects: listProjects() });
@@ -554,12 +854,14 @@ io.on("connection", (socket) => {
 
     io.to(p).emit("projectDeleted", { project: p });
     if (historyByProject[p]) delete historyByProject[p];
+    if (memoryByProject[p]) delete memoryByProject[p];
     if (presence.has(p)) presence.delete(p);
 
     projects = projects.filter((x) => x !== p);
     if (projects.length === 0) projects = ["Ever"];
     saveProjects();
     saveHistoryNow();
+    saveMemoryProjectNow();
     broadcastProjects();
   });
 
@@ -604,8 +906,7 @@ io.on("connection", (socket) => {
     pushMessage(p, { id: msg.id, ts: msg.ts, username: msg.username, userId: msg.userId, message: msg.message });
     io.to(p).emit("chatMessage", msg);
 
-    // 🔥 Sensi auto
-    sensiRespondToUserMessage({ project: p, username: u, userText: m }).catch((e) => {
+    sensiRespondToUserMessage({ project: p, username: u, userId: uid, userText: m }).catch((e) => {
       console.error("[sensi-auto]", e);
       emitSensi(p, "⚠️ Erreur Sensi (voir logs).");
     });
@@ -639,14 +940,19 @@ io.on("connection", (socket) => {
 });
 
 /* ==================================================
-   SAFETY + START
+   START
 ================================================== */
 process.on("unhandledRejection", (err) => console.error("[unhandledRejection]", err));
 process.on("uncaughtException", (err) => console.error("[uncaughtException]", err));
 
 process.on("SIGTERM", () => {
   console.warn("[SIGTERM] shutting down");
-  try { saveProjects(); saveHistoryNow(); } catch (_) {}
+  try {
+    saveProjects();
+    saveHistoryNow();
+    saveMemoryProjectNow();
+    saveMemoryGlobalNow();
+  } catch (_) {}
   server.close(() => process.exit(0));
 });
 
