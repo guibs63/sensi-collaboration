@@ -1,4 +1,6 @@
-// guibs:/client.js (complet : projets dynamiques + persistance messages + présence)
+// guibs:/client.js (COMPLET)
+// - userId persistant (localStorage) => seul l’auteur peut supprimer
+// - projets dynamiques, présence, historique, suppression realtime
 
 const socket = io(window.location.origin, {
   transports: ["websocket"],
@@ -8,6 +10,11 @@ let currentProject = null;
 let currentUsername = null;
 
 const seenMessageIds = new Set();
+const messageNodes = new Map(); // messageId -> DOM element
+
+// userId persistant
+const LS_USER_ID = "sensi_user_id";
+const myUserId = getOrCreateUserId();
 
 const chat = document.getElementById("chat");
 const form = document.getElementById("chat-form");
@@ -25,9 +32,9 @@ const usersList = document.getElementById("users");
 const usersCount = document.getElementById("users-count");
 const currentProjectLabel = document.getElementById("current-project-label");
 
-// ---------------------------
-// Utils
-// ---------------------------
+/* =========================
+   Utils
+========================= */
 function cleanStr(v) {
   return String(v ?? "").trim();
 }
@@ -51,9 +58,29 @@ function formatTime(ts) {
   }
 }
 
+function getOrCreateUserId() {
+  try {
+    const existing = localStorage.getItem(LS_USER_ID);
+    if (existing && existing.length >= 8) return existing;
+
+    const uid =
+      (crypto?.randomUUID ? crypto.randomUUID() : `uid_${Date.now()}_${Math.random().toString(16).slice(2)}`);
+
+    localStorage.setItem(LS_USER_ID, uid);
+    return uid;
+  } catch {
+    // fallback sans localStorage
+    return `uid_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  }
+}
+
+/* =========================
+   UI helpers
+========================= */
 function clearChat() {
   chat.innerHTML = "";
   seenMessageIds.clear();
+  messageNodes.clear();
 }
 
 function addSystem(text) {
@@ -64,20 +91,83 @@ function addSystem(text) {
   chat.scrollTop = chat.scrollHeight;
 }
 
-function addMessage({ id, ts, username, message }) {
-  if (id && seenMessageIds.has(id)) return;
-  if (id) seenMessageIds.add(id);
+function closeAllMenus() {
+  document.querySelectorAll(".menu").forEach((m) => m.setAttribute("hidden", ""));
+}
+document.addEventListener("click", () => closeAllMenus());
+
+function removeMessageFromUI(messageId) {
+  const id = Number(messageId);
+  if (!Number.isFinite(id)) return;
+
+  const node = messageNodes.get(id);
+  if (node && node.parentNode) node.parentNode.removeChild(node);
+
+  messageNodes.delete(id);
+  seenMessageIds.delete(id);
+}
+
+function addMessage({ id, ts, username, userId, message }) {
+  const mid = Number(id);
+  if (Number.isFinite(mid) && seenMessageIds.has(mid)) return;
+  if (Number.isFinite(mid)) seenMessageIds.add(mid);
 
   const time = formatTime(ts);
-  const div = document.createElement("div");
-  div.className = "msg";
-  div.innerHTML = `
-    <span class="time">${time ? `[${time}]` : ""}</span>
-    <strong>${escapeHtml(username)}:</strong>
-    <span class="text">${escapeHtml(message)}</span>
+  const isMine = cleanStr(userId) && cleanStr(userId) === cleanStr(myUserId);
+
+  const row = document.createElement("div");
+  row.className = "msg msg-row";
+  if (Number.isFinite(mid)) row.dataset.mid = String(mid);
+
+  // Menu ⋮ seulement si c'est mon message
+  row.innerHTML = `
+    <div class="msg-main">
+      <span class="time">${time ? `[${time}]` : ""}</span>
+      <strong>${escapeHtml(username)}:</strong>
+      <span class="text">${escapeHtml(message)}</span>
+    </div>
+
+    <div class="msg-actions">
+      ${isMine ? `<button class="kebab" type="button" title="Options">⋮</button>
+      <div class="menu" hidden>
+        <button class="menu-item delete" type="button">🗑️ Supprimer</button>
+      </div>` : ""}
+    </div>
   `;
-  chat.appendChild(div);
+
+  if (isMine) {
+    const kebab = row.querySelector(".kebab");
+    const menu = row.querySelector(".menu");
+    const delBtn = row.querySelector(".menu-item.delete");
+
+    kebab.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const isHidden = menu.hasAttribute("hidden");
+      closeAllMenus();
+      if (isHidden) menu.removeAttribute("hidden");
+    });
+
+    delBtn.addEventListener("click", () => {
+      if (!currentProject) return;
+      if (!Number.isFinite(mid)) return;
+
+      const ok = confirm("Supprimer ce message ?");
+      if (!ok) return;
+
+      socket.emit("deleteMessage", {
+        project: currentProject,
+        messageId: mid,
+        userId: myUserId,
+      });
+
+      menu.setAttribute("hidden", "");
+    });
+  }
+
+  chat.appendChild(row);
   chat.scrollTop = chat.scrollHeight;
+
+  if (Number.isFinite(mid)) messageNodes.set(mid, row);
 }
 
 function renderUsers(users) {
@@ -109,9 +199,9 @@ function setProjectLabel(p) {
   currentProjectLabel.textContent = p || "—";
 }
 
-// ---------------------------
-// Projects UI
-// ---------------------------
+/* =========================
+   Projects dropdown
+========================= */
 function setProjectsOptions(projects, keepSelection = true) {
   const prev = keepSelection ? cleanStr(projectSelect.value) : "";
   projectSelect.innerHTML = "";
@@ -123,21 +213,19 @@ function setProjectsOptions(projects, keepSelection = true) {
     projectSelect.appendChild(opt);
   }
 
-  // restore selection if possible
   if (keepSelection && prev) {
-    const found = Array.from(projectSelect.options).some((o) => o.value === prev);
-    if (found) projectSelect.value = prev;
+    const exists = Array.from(projectSelect.options).some((o) => o.value === prev);
+    if (exists) projectSelect.value = prev;
   }
 
-  // if nothing selected, select first
   if (!projectSelect.value && projectSelect.options.length > 0) {
     projectSelect.value = projectSelect.options[0].value;
   }
 }
 
-// ---------------------------
-// Join logic
-// ---------------------------
+/* =========================
+   Join
+========================= */
 function joinProject() {
   const username = cleanStr(usernameInput.value);
   const project = cleanStr(projectSelect.value);
@@ -159,7 +247,11 @@ function joinProject() {
   renderUsers([]);
   addSystem(`Connexion au projet "${currentProject}"...`);
 
-  socket.emit("joinProject", { username: currentUsername, project: currentProject });
+  socket.emit("joinProject", {
+    username: currentUsername,
+    project: currentProject,
+    userId: myUserId,
+  });
 }
 
 joinBtn.addEventListener("click", joinProject);
@@ -168,9 +260,9 @@ usernameInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") joinProject();
 });
 
-// ---------------------------
-// Create/Delete projects (realtime)
-// ---------------------------
+/* =========================
+   Create/Delete Projects
+========================= */
 createProjectBtn.addEventListener("click", () => {
   const name = cleanStr(newProjectInput.value);
   if (!name) return;
@@ -195,9 +287,9 @@ deleteProjectBtn.addEventListener("click", () => {
   socket.emit("deleteProject", { project: p });
 });
 
-// ---------------------------
-// Send message
-// ---------------------------
+/* =========================
+   Send message
+========================= */
 form.addEventListener("submit", (e) => {
   e.preventDefault();
 
@@ -206,15 +298,20 @@ form.addEventListener("submit", (e) => {
 
   if (!message || !username || !currentProject) return;
 
-  socket.emit("chatMessage", { username, message, project: currentProject });
+  socket.emit("chatMessage", {
+    username,
+    userId: myUserId,
+    message,
+    project: currentProject,
+  });
 
   input.value = "";
   input.focus();
 });
 
-// ---------------------------
-// Receive: history
-// ---------------------------
+/* =========================
+   Receive: history
+========================= */
 socket.on("chatHistory", (payload) => {
   const p = cleanStr(payload?.project);
   const msgs = Array.isArray(payload?.messages) ? payload.messages : [];
@@ -229,14 +326,21 @@ socket.on("chatHistory", (payload) => {
   }
 
   addSystem(`Historique chargé pour "${currentProject}" (${msgs.length} message(s)).`);
+
   for (const m of msgs) {
-    addMessage({ id: m.id, ts: m.ts, username: m.username, message: m.message });
+    addMessage({
+      id: m.id,
+      ts: m.ts,
+      username: m.username,
+      userId: m.userId,
+      message: m.message,
+    });
   }
 });
 
-// ---------------------------
-// Receive: live message
-// ---------------------------
+/* =========================
+   Receive: live message
+========================= */
 socket.on("chatMessage", (data) => {
   const p = cleanStr(data?.project);
   if (currentProject && p && p !== currentProject) return;
@@ -245,36 +349,51 @@ socket.on("chatMessage", (data) => {
     id: data?.id,
     ts: data?.ts,
     username: data?.username,
+    userId: data?.userId,
     message: data?.message,
   });
 });
 
-// ---------------------------
-// Receive: system
-// ---------------------------
+/* =========================
+   Receive: deleted message
+========================= */
+socket.on("messageDeleted", (payload) => {
+  const p = cleanStr(payload?.project);
+  const mid = Number(payload?.messageId);
+
+  if (currentProject && p && p !== currentProject) return;
+  if (!Number.isFinite(mid)) return;
+
+  removeMessageFromUI(mid);
+});
+
+/* =========================
+   Receive: system
+========================= */
 socket.on("systemMessage", (msg) => {
   const p = cleanStr(msg?.project);
   if (currentProject && p && p !== currentProject) return;
+
   addSystem(msg?.text || "Message système");
 });
 
-// ---------------------------
-// Receive: presence
-// ---------------------------
+/* =========================
+   Receive: presence
+========================= */
 socket.on("presenceUpdate", (payload) => {
   const p = cleanStr(payload?.project);
   if (!currentProject || !p || p !== currentProject) return;
+
   renderUsers(payload?.users);
 });
 
-// ---------------------------
-// Receive: projects list update (realtime)
-// ---------------------------
+/* =========================
+   Projects realtime list
+========================= */
 socket.on("projectsUpdate", (payload) => {
   const list = Array.isArray(payload?.projects) ? payload.projects : [];
   setProjectsOptions(list, true);
 
-  // si le projet courant a été supprimé, reset
   if (currentProject && !list.includes(currentProject)) {
     currentProject = null;
     setProjectLabel("—");
@@ -284,19 +403,6 @@ socket.on("projectsUpdate", (payload) => {
   }
 });
 
-// confirmation / erreurs projets
-socket.on("projectOk", (payload) => {
-  if (payload?.action === "create") {
-    newProjectInput.value = "";
-  }
-});
-
-socket.on("projectError", (payload) => {
-  const msg = payload?.message || "Erreur projet";
-  alert(msg);
-});
-
-// si projet supprimé pendant qu'on est dedans
 socket.on("projectDeleted", ({ project }) => {
   const p = cleanStr(project);
   if (currentProject && p === currentProject) {
@@ -308,18 +414,24 @@ socket.on("projectDeleted", ({ project }) => {
   }
 });
 
-// ---------------------------
-// Connect / auto sync
-// ---------------------------
+socket.on("projectError", (payload) => {
+  alert(payload?.message || "Erreur projet");
+});
+
+/* =========================
+   Connect / bootstrap
+========================= */
 socket.on("connect", () => {
   console.log("✅ Connecté Socket.io", socket.id);
-
-  // demander liste projets au connect
   socket.emit("getProjects");
 
-  // si on était déjà dans un projet, re-join
+  // si déjà connecté à un projet, on rejoin (optionnel)
   if (currentProject && currentUsername) {
-    socket.emit("joinProject", { username: currentUsername, project: currentProject });
+    socket.emit("joinProject", {
+      username: currentUsername,
+      project: currentProject,
+      userId: myUserId,
+    });
   }
 });
 

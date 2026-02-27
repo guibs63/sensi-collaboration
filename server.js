@@ -1,4 +1,4 @@
-// guibs:/server.js (complet adapté : projets dynamiques + suppression + persistance)
+// guibs:/server.js
 "use strict";
 
 const express = require("express");
@@ -15,15 +15,39 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(__dirname));
 
-/* --------------------------------------------------
-   STORAGE
--------------------------------------------------- */
+/* ==================================================
+   CONFIG
+================================================== */// guibs:/server.js
+"use strict";
+
+const express = require("express");
+const cors = require("cors");
+const http = require("http");
+const path = require("path");
+const fs = require("fs");
+const { Server } = require("socket.io");
+
+const app = express();
+app.set("trust proxy", 1);
+
+app.use(cors());
+app.use(express.json());
+app.use(express.static(__dirname));
+
+/* ==================================================
+   CONFIG
+================================================== */
+const APP_VERSION = process.env.APP_VERSION || "dynamic-projects-v3-author-delete";
+
 const STORAGE_DIR = path.join(__dirname, "storage");
 const HISTORY_FILE = path.join(STORAGE_DIR, "messages.json");
 const PROJECTS_FILE = path.join(STORAGE_DIR, "projects.json");
 
 const MAX_MESSAGES_PER_PROJECT = Number(process.env.MAX_MESSAGES_PER_PROJECT || 200);
 
+/* ==================================================
+   STORAGE INIT
+================================================== */
 function ensureStorage() {
   try {
     if (!fs.existsSync(STORAGE_DIR)) fs.mkdirSync(STORAGE_DIR, { recursive: true });
@@ -33,58 +57,34 @@ function ensureStorage() {
     console.error("[storage] ensureStorage failed:", e);
   }
 }
+ensureStorage();
 
-function safeReadJson(file, fallback) {
+function readJSON(file, fallback) {
   try {
-    const raw = fs.readFileSync(file, "utf8");
-    return JSON.parse(raw || "");
+    return JSON.parse(fs.readFileSync(file, "utf8"));
   } catch {
     return fallback;
   }
 }
 
-function safeWriteJson(file, obj) {
+function writeJSON(file, data) {
   try {
-    fs.writeFileSync(file, JSON.stringify(obj, null, 2), "utf8");
+    fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8");
   } catch (e) {
     console.error("[storage] write failed:", file, e);
   }
 }
 
-ensureStorage();
+let historyByProject = readJSON(HISTORY_FILE, {});
+let projects = readJSON(PROJECTS_FILE, ["Ever"]);
 
-/* --------------------------------------------------
-   DATA IN MEMORY
--------------------------------------------------- */
-let historyByProject = safeReadJson(HISTORY_FILE, {});
-let projects = safeReadJson(PROJECTS_FILE, ["Ever"]);
 if (!Array.isArray(projects) || projects.length === 0) projects = ["Ever"];
-
-// normalise unique + trim
 projects = Array.from(new Set(projects.map((p) => String(p || "").trim()).filter(Boolean)));
 if (projects.length === 0) projects = ["Ever"];
 
-function saveProjects() {
-  safeWriteJson(PROJECTS_FILE, projects);
-}
-
-function saveHistoryNow() {
-  safeWriteJson(HISTORY_FILE, historyByProject);
-}
-
-// debounce history save
-let saveTimer = null;
-function scheduleHistorySave() {
-  if (saveTimer) return;
-  saveTimer = setTimeout(() => {
-    saveTimer = null;
-    saveHistoryNow();
-  }, 400);
-}
-
-/* --------------------------------------------------
+/* ==================================================
    HELPERS
--------------------------------------------------- */
+================================================== */
 function cleanStr(v) {
   return String(v ?? "").trim();
 }
@@ -96,13 +96,35 @@ function safeProjectKey(project) {
 }
 
 function isValidProjectName(name) {
-  // simple + safe (évite / .. etc.)
-  // autorise lettres, chiffres, espaces, _ - .
   return /^[a-zA-Z0-9 _.\-]{2,50}$/.test(name);
 }
 
 function listProjects() {
   return projects.slice().sort((a, b) => a.localeCompare(b, "fr"));
+}
+
+function saveProjects() {
+  writeJSON(PROJECTS_FILE, projects);
+}
+
+function saveHistoryNow() {
+  writeJSON(HISTORY_FILE, historyByProject);
+}
+
+let saveTimer = null;
+function scheduleHistorySave() {
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    saveHistoryNow();
+  }, 400);
+}
+
+function getHistory(project) {
+  const p = safeProjectKey(project);
+  if (!p) return [];
+  const arr = historyByProject[p];
+  return Array.isArray(arr) ? arr : [];
 }
 
 function pushMessage(project, msgObj) {
@@ -119,82 +141,82 @@ function pushMessage(project, msgObj) {
   scheduleHistorySave();
 }
 
-function getHistory(project) {
+// retourne true si supprimé
+function deleteMessageIfAuthor(project, messageId, requesterUserId) {
   const p = safeProjectKey(project);
-  if (!p) return [];
+  if (!p) return { ok: false, reason: "bad_project" };
+  if (!Array.isArray(historyByProject[p])) return { ok: false, reason: "no_history" };
+
+  const idNum = Number(messageId);
+  if (!Number.isFinite(idNum)) return { ok: false, reason: "bad_id" };
+
+  const reqId = cleanStr(requesterUserId);
+  if (!reqId) return { ok: false, reason: "no_user" };
+
   const arr = historyByProject[p];
-  return Array.isArray(arr) ? arr : [];
+  const idx = arr.findIndex((m) => Number(m?.id) === idNum);
+  if (idx === -1) return { ok: false, reason: "not_found" };
+
+  const msg = arr[idx];
+  if (cleanStr(msg?.userId) !== reqId) {
+    return { ok: false, reason: "not_author" };
+  }
+
+  arr.splice(idx, 1);
+  scheduleHistorySave();
+  return { ok: true };
 }
 
-function deleteProjectData(project) {
-  const p = safeProjectKey(project);
-  if (!p) return;
-
-  // supprime messages
-  if (historyByProject[p]) delete historyByProject[p];
-
-  // supprime presence map (voir plus bas)
-  if (presence.has(p)) presence.delete(p);
-
-  // sauvegardes
-  saveHistoryNow();
-}
-
-/* --------------------------------------------------
-   HEALTH CHECK
--------------------------------------------------- */
+/* ==================================================
+   HEALTH
+================================================== */
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
     time: new Date().toISOString(),
     env: process.env.NODE_ENV || "production",
+    version: APP_VERSION,
   });
 });
 
-/* --------------------------------------------------
-   PROJECTS HTTP API
--------------------------------------------------- */
+/* ==================================================
+   HTTP ROUTES
+================================================== */
 app.get("/projects", (req, res) => {
   res.json({ ok: true, projects: listProjects() });
 });
 
-/* --------------------------------------------------
-   HISTORY HTTP (debug)
--------------------------------------------------- */
 app.get("/history", (req, res) => {
   const project = safeProjectKey(req.query.project);
   if (!project) return res.status(400).json({ ok: false, error: "missing project" });
-
   res.json({ ok: true, project, messages: getHistory(project) });
 });
 
-/* --------------------------------------------------
-   ROOT
--------------------------------------------------- */
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "index.html"));
 });
 
-/* --------------------------------------------------
+/* ==================================================
    SOCKET.IO
--------------------------------------------------- */
+================================================== */
 const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
-// presence: project -> Map(socketId -> username)
+// presence: project -> Map(socketId -> { username, userId })
 const presence = new Map();
 
-function getProjectUsers(project) {
-  const m = presence.get(project);
-  if (!m) return [];
-  return Array.from(m.values()).filter(Boolean);
+function getUsers(project) {
+  const map = presence.get(project);
+  if (!map) return [];
+  // on renvoie uniquement les usernames (UI)
+  return Array.from(map.values()).map((v) => v.username).filter(Boolean);
 }
 
 function emitPresence(project) {
-  io.to(project).emit("presenceUpdate", { project, users: getProjectUsers(project) });
+  io.to(project).emit("presenceUpdate", { project, users: getUsers(project) });
 }
 
 function emitSystem(project, text) {
@@ -213,7 +235,11 @@ function broadcastProjects() {
 io.on("connection", (socket) => {
   console.log("Socket connected:", socket.id);
 
-  /* ---------- projects realtime ---------- */
+  // on stocke l'identité dans socket.data (persistant pour la connexion)
+  socket.data.userId = "";
+  socket.data.username = "";
+
+  // ---------------- Projects realtime ----------------
   socket.on("getProjects", () => {
     socket.emit("projectsUpdate", { projects: listProjects() });
   });
@@ -222,12 +248,12 @@ io.on("connection", (socket) => {
     const n = cleanStr(name);
 
     if (!isValidProjectName(n)) {
-      socket.emit("projectError", { action: "create", message: "Nom de projet invalide (2-50, lettres/chiffres/espaces/_-.)" });
+      socket.emit("projectError", { message: "Nom invalide (2-50, lettres/chiffres/espaces/_-.)" });
       return;
     }
 
     if (projects.includes(n)) {
-      socket.emit("projectError", { action: "create", message: "Ce projet existe déjà." });
+      socket.emit("projectError", { message: "Projet déjà existant." });
       return;
     }
 
@@ -235,91 +261,132 @@ io.on("connection", (socket) => {
     projects = Array.from(new Set(projects));
     saveProjects();
     broadcastProjects();
-
-    socket.emit("projectOk", { action: "create", project: n });
   });
 
   socket.on("deleteProject", ({ project }) => {
     const p = safeProjectKey(project);
     if (!p) return;
 
-    // option: empêcher la suppression du dernier projet
-    if (projects.length <= 1 && projects.includes(p)) {
-      socket.emit("projectError", { action: "delete", message: "Impossible de supprimer le dernier projet." });
-      return;
-    }
-
     if (!projects.includes(p)) {
-      socket.emit("projectError", { action: "delete", message: "Projet introuvable." });
+      socket.emit("projectError", { message: "Projet introuvable." });
       return;
     }
 
-    // prévenir les clients dans la room
+    if (projects.length <= 1) {
+      socket.emit("projectError", { message: "Impossible de supprimer le dernier projet." });
+      return;
+    }
+
     io.to(p).emit("projectDeleted", { project: p });
 
-    // forcer les sockets à quitter la room
-    // (Socket.IO v4 : on peut fetch sockets dans room)
-    io.in(p).fetchSockets().then((sockets) => {
-      sockets.forEach((s) => s.leave(p));
-    }).catch(() => {});
+    // supprimer historique + presence
+    if (historyByProject[p]) delete historyByProject[p];
+    if (presence.has(p)) presence.delete(p);
 
-    // supprimer données + liste
     projects = projects.filter((x) => x !== p);
-    if (projects.length === 0) projects = ["Ever"]; // garde un fallback
+    if (projects.length === 0) projects = ["Ever"];
+
     saveProjects();
-
-    deleteProjectData(p);
-
+    saveHistoryNow();
     broadcastProjects();
-    socket.emit("projectOk", { action: "delete", project: p });
   });
 
-  /* ---------- join project ---------- */
-  socket.on("joinProject", ({ project, username }) => {
+  // ---------------- Join project ----------------
+  socket.on("joinProject", ({ project, username, userId }) => {
     const p = safeProjectKey(project);
     const u = cleanStr(username) || "Anonyme";
+    const uid = cleanStr(userId);
+
     if (!p) return;
 
-    // si projet n’existe pas, refuse
     if (!projects.includes(p)) {
-      socket.emit("projectError", { action: "join", message: `Projet "${p}" inexistant.` });
+      socket.emit("projectError", { message: `Projet "${p}" inexistant.` });
       socket.emit("projectsUpdate", { projects: listProjects() });
       return;
     }
 
+    if (!uid) {
+      socket.emit("projectError", { message: "Identifiant utilisateur manquant (userId)." });
+      return;
+    }
+
+    socket.data.userId = uid;
+    socket.data.username = u;
+
     socket.join(p);
 
     if (!presence.has(p)) presence.set(p, new Map());
-    presence.get(p).set(socket.id, u);
+    presence.get(p).set(socket.id, { username: u, userId: uid });
 
-    // envoyer l'historique (persistant)
     socket.emit("chatHistory", { project: p, messages: getHistory(p) });
 
     emitPresence(p);
     emitSystem(p, `👋 ${u} a rejoint ${p}`);
   });
 
-  /* ---------- chat ---------- */
-  socket.on("chatMessage", ({ project, username, message }) => {
+  // ---------------- Chat message ----------------
+  socket.on("chatMessage", ({ project, username, userId, message }) => {
     const p = safeProjectKey(project);
-    const u = cleanStr(username) || "Anonyme";
+    const u = cleanStr(username) || socket.data.username || "Anonyme";
+    const uid = cleanStr(userId) || socket.data.userId;
     const m = cleanStr(message);
+
     if (!p || !m) return;
 
-    // sécurité: si projet supprimé entre temps
     if (!projects.includes(p)) {
-      socket.emit("projectError", { action: "chat", message: `Projet "${p}" supprimé ou introuvable.` });
+      socket.emit("projectError", { message: `Projet "${p}" introuvable.` });
       return;
     }
 
-    const msg = { id: Date.now(), ts: Date.now(), project: p, username: u, message: m };
+    if (!uid) {
+      socket.emit("projectError", { message: "Identifiant utilisateur manquant (userId)." });
+      return;
+    }
 
-    pushMessage(p, { id: msg.id, ts: msg.ts, username: msg.username, message: msg.message });
+    const msg = {
+      id: Date.now(),
+      ts: Date.now(),
+      project: p,
+      username: u,
+      userId: uid, // IMPORTANT: auteur
+      message: m,
+    };
+
+    // persistance (on garde userId)
+    pushMessage(p, {
+      id: msg.id,
+      ts: msg.ts,
+      username: msg.username,
+      userId: msg.userId,
+      message: msg.message,
+    });
 
     io.to(p).emit("chatMessage", msg);
   });
 
-  /* ---------- disconnect ---------- */
+  // ---------------- Delete message (author only) ----------------
+  socket.on("deleteMessage", ({ project, messageId, userId }) => {
+    const p = safeProjectKey(project);
+    const id = Number(messageId);
+    const uid = cleanStr(userId) || socket.data.userId;
+
+    if (!p || !Number.isFinite(id)) return;
+    if (!projects.includes(p)) return;
+
+    const res = deleteMessageIfAuthor(p, id, uid);
+
+    if (!res.ok) {
+      if (res.reason === "not_author") {
+        socket.emit("projectError", { message: "Suppression refusée : seul l’auteur peut supprimer ce message." });
+      }
+      return;
+    }
+
+    // broadcast suppression à tous les clients du projet
+    io.to(p).emit("messageDeleted", { project: p, messageId: id });
+  });
+
+  // ---------------- Disconnect ----------------
   socket.on("disconnect", () => {
     for (const [proj, map] of presence.entries()) {
       if (map.has(socket.id)) {
@@ -331,9 +398,19 @@ io.on("connection", (socket) => {
   });
 });
 
-/* --------------------------------------------------
+/* ==================================================
+   START
+================================================== */
+const PORT = process.env.PORT || 3000;
+
+server.listen(PORT, "0.0.0.0", () => {
+  console.log("🚀 Server running on", PORT);
+  console.log("Version:", APP_VERSION);
+});
+
+/* ==================================================
    SAFETY
--------------------------------------------------- */
+================================================== */
 process.on("unhandledRejection", (err) => console.error("[unhandledRejection]", err));
 process.on("uncaughtException", (err) => console.error("[uncaughtException]", err));
 
@@ -346,11 +423,301 @@ process.on("SIGTERM", () => {
   server.close(() => process.exit(0));
 });
 
-/* --------------------------------------------------
+const APP_VERSION = process.env.APP_VERSION || "dynamic-projects-v1";
+
+const STORAGE_DIR = path.join(__dirname, "storage");
+const HISTORY_FILE = path.join(STORAGE_DIR, "messages.json");
+const PROJECTS_FILE = path.join(STORAGE_DIR, "projects.json");
+
+const MAX_MESSAGES_PER_PROJECT = 200;
+
+/* ==================================================
+   STORAGE INIT
+================================================== */
+
+function ensureStorage() {
+  if (!fs.existsSync(STORAGE_DIR)) {
+    fs.mkdirSync(STORAGE_DIR, { recursive: true });
+  }
+
+  if (!fs.existsSync(HISTORY_FILE)) {
+    fs.writeFileSync(HISTORY_FILE, JSON.stringify({}, null, 2));
+  }
+
+  if (!fs.existsSync(PROJECTS_FILE)) {
+    fs.writeFileSync(PROJECTS_FILE, JSON.stringify(["Ever"], null, 2));
+  }
+}
+
+ensureStorage();
+
+function readJSON(file, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJSON(file, data) {
+  fs.writeFileSync(file, JSON.stringify(data, null, 2));
+}
+
+let historyByProject = readJSON(HISTORY_FILE, {});
+let projects = readJSON(PROJECTS_FILE, ["Ever"]);
+
+if (!Array.isArray(projects) || projects.length === 0) {
+  projects = ["Ever"];
+}
+
+projects = Array.from(new Set(projects));
+
+/* ==================================================
+   HELPERS
+================================================== */
+
+function cleanStr(v) {
+  return String(v ?? "").trim();
+}
+
+function isValidProjectName(name) {
+  return /^[a-zA-Z0-9 _.\-]{2,50}$/.test(name);
+}
+
+function saveProjects() {
+  writeJSON(PROJECTS_FILE, projects);
+}
+
+function saveHistory() {
+  writeJSON(HISTORY_FILE, historyByProject);
+}
+
+let saveTimer = null;
+function scheduleHistorySave() {
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    saveHistory();
+  }, 400);
+}
+
+function pushMessage(project, msg) {
+  if (!historyByProject[project]) historyByProject[project] = [];
+  historyByProject[project].push(msg);
+
+  if (historyByProject[project].length > MAX_MESSAGES_PER_PROJECT) {
+    historyByProject[project] =
+      historyByProject[project].slice(-MAX_MESSAGES_PER_PROJECT);
+  }
+
+  scheduleHistorySave();
+}
+
+function listProjects() {
+  return projects.slice().sort((a, b) => a.localeCompare(b, "fr"));
+}
+
+/* ==================================================
+   HEALTH
+================================================== */
+
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    time: new Date().toISOString(),
+    env: process.env.NODE_ENV || "production",
+    version: APP_VERSION
+  });
+});
+
+/* ==================================================
+   HTTP ROUTES
+================================================== */
+
+app.get("/projects", (req, res) => {
+  res.json({ ok: true, projects: listProjects() });
+});
+
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "index.html"));
+});
+
+/* ==================================================
+   SOCKET.IO
+================================================== */
+
+const server = http.createServer(app);
+
+const io = new Server(server, {
+  cors: { origin: "*", methods: ["GET", "POST"] }
+});
+
+// presence: project -> Map(socketId -> username)
+const presence = new Map();
+
+function getUsers(project) {
+  const map = presence.get(project);
+  if (!map) return [];
+  return Array.from(map.values());
+}
+
+function emitPresence(project) {
+  io.to(project).emit("presenceUpdate", {
+    project,
+    users: getUsers(project)
+  });
+}
+
+function broadcastProjects() {
+  io.emit("projectsUpdate", {
+    projects: listProjects()
+  });
+}
+
+io.on("connection", (socket) => {
+
+  /* ---------- Projects ---------- */
+
+  socket.on("getProjects", () => {
+    socket.emit("projectsUpdate", {
+      projects: listProjects()
+    });
+  });
+
+  socket.on("createProject", ({ name }) => {
+    const n = cleanStr(name);
+
+    if (!isValidProjectName(n)) {
+      socket.emit("projectError", {
+        message: "Nom invalide (2-50 caractères)"
+      });
+      return;
+    }
+
+    if (projects.includes(n)) {
+      socket.emit("projectError", {
+        message: "Projet déjà existant"
+      });
+      return;
+    }
+
+    projects.push(n);
+    saveProjects();
+    broadcastProjects();
+  });
+
+  socket.on("deleteProject", ({ project }) => {
+    const p = cleanStr(project);
+    if (!projects.includes(p)) return;
+
+    if (projects.length <= 1) {
+      socket.emit("projectError", {
+        message: "Impossible de supprimer le dernier projet"
+      });
+      return;
+    }
+
+    // notifier les clients dans la room
+    io.to(p).emit("projectDeleted", { project: p });
+
+    // supprimer données
+    delete historyByProject[p];
+    presence.delete(p);
+
+    projects = projects.filter(x => x !== p);
+
+    saveProjects();
+    saveHistory();
+
+    broadcastProjects();
+  });
+
+  /* ---------- Join ---------- */
+
+  socket.on("joinProject", ({ project, username }) => {
+    const p = cleanStr(project);
+    const u = cleanStr(username) || "Anonyme";
+
+    if (!projects.includes(p)) return;
+
+    socket.join(p);
+
+    if (!presence.has(p)) presence.set(p, new Map());
+    presence.get(p).set(socket.id, u);
+
+    socket.emit("chatHistory", {
+      project: p,
+      messages: historyByProject[p] || []
+    });
+
+    emitPresence(p);
+
+    io.to(p).emit("systemMessage", {
+      id: Date.now(),
+      ts: Date.now(),
+      project: p,
+      text: `👋 ${u} a rejoint ${p}`
+    });
+  });
+
+  /* ---------- Chat ---------- */
+
+  socket.on("chatMessage", ({ project, username, message }) => {
+    const p = cleanStr(project);
+    const u = cleanStr(username) || "Anonyme";
+    const m = cleanStr(message);
+
+    if (!projects.includes(p) || !m) return;
+
+    const msg = {
+      id: Date.now(),
+      ts: Date.now(),
+      project: p,
+      username: u,
+      message: m
+    };
+
+    pushMessage(p, {
+      id: msg.id,
+      ts: msg.ts,
+      username: msg.username,
+      message: msg.message
+    });
+
+    io.to(p).emit("chatMessage", msg);
+  });
+
+  /* ---------- Disconnect ---------- */
+
+  socket.on("disconnect", () => {
+    for (const [proj, map] of presence.entries()) {
+      if (map.has(socket.id)) {
+        map.delete(socket.id);
+        emitPresence(proj);
+      }
+    }
+  });
+});
+
+/* ==================================================
    START
--------------------------------------------------- */
+================================================== */
+
 const PORT = process.env.PORT || 3000;
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log("Server running on", PORT);
+  console.log("🚀 Server running on", PORT);
+  console.log("Version:", APP_VERSION);
+});
+
+/* ==================================================
+   SAFETY
+================================================== */
+
+process.on("unhandledRejection", (err) => {
+  console.error("[unhandledRejection]", err);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("[uncaughtException]", err);
 });
