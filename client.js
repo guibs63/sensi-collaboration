@@ -1,16 +1,17 @@
-// guibs:/client.js (COMPLET) — ULTRA v3.3 CLIENT (compatible server ULTRA v3.3)
-// + VOICE "OVER" + FFT temps réel + Enregistrement + Upload /upload
-//
-// Backend attendu (OK sur ton server):
-// - GET  /projects -> { ok:true, projects:[...] }
-// - POST /upload   -> FormData(file, project, username, userId)
-// - socket:
-//   - "getProjects" -> "projectsUpdate" {projects:[...]}
-//   - "joinProject" {project,username,userId} -> "chatHistory" {project,messages:[...]}
-//   - "chatMessage" {project,username,userId,message} -> broadcast "chatMessage"
-//   - "deleteMessage" {project,messageId,userId} -> "messageDeleted" {project,messageId}
-//   - "presenceUpdate" {project,users:[...]}
+// guibs:/client.js (COMPLET) — ULTRA v3.3 CLIENT
+// ✅ Aligné server ULTRA v3.3 (Railway-safe)
+// ✅ Projets (GET /projects => {ok:true,projects:[...]}) + sockets getProjects/projectsUpdate
+// ✅ Join project + chat history + presence
+// ✅ Delete message (author-only)
+// ✅ Upload fichiers + audio via POST /upload
+// ✅ VOICE "OVER" + FFT temps réel + MediaRecorder
+// ✅ DEBUG: window.socket + logs + statusbar (#status-text si présent)
 
+"use strict";
+
+/** =========================
+ *  SOCKET INIT (GLOBAL)
+ *  ========================= */
 const socket = io(window.location.origin, {
   transports: ["websocket", "polling"],
   reconnection: true,
@@ -18,6 +19,12 @@ const socket = io(window.location.origin, {
   reconnectionDelay: 600,
   timeout: 20000,
 });
+
+// ✅ rendre accessible depuis console
+window.socket = socket;
+
+// Debug logs
+console.log("client.js loaded ✅", { ioType: typeof io });
 
 /** =========================
  *  FLAGS
@@ -84,6 +91,9 @@ const usersList = document.getElementById("users");
 const usersCount = document.getElementById("users-count");
 const currentProjectLabel = document.getElementById("current-project-label");
 
+// Optionnel: statusbar (#status-text)
+const statusText = document.getElementById("status-text");
+
 // VOICE UI (créée dynamiquement)
 let voiceBar = null;
 let btnVoice = null;
@@ -112,6 +122,32 @@ let fftCtx = null;
     throw new Error("UI DOM missing");
   }
 })();
+
+/** =========================
+ *  STATUSBAR HELPERS
+ *  ========================= */
+function setStatusBar(txt) {
+  if (!statusText) return;
+  statusText.textContent = String(txt || "");
+}
+
+/** =========================
+ *  SOCKET DEBUG / STATUS
+ *  ========================= */
+setStatusBar("socket: connecting…");
+
+socket.on("connect", () => {
+  console.log("✅ socket connected", socket.id);
+  setStatusBar(`socket: connected (${socket.id})`);
+});
+socket.on("disconnect", (reason) => {
+  console.log("⚠️ socket disconnected", reason);
+  setStatusBar("socket: disconnected");
+});
+socket.on("connect_error", (err) => {
+  console.log("❌ connect_error", err?.message || err);
+  setStatusBar(`socket: error (${err?.message || "?"})`);
+});
 
 /** =========================
  *  UTILS
@@ -610,10 +646,10 @@ async function loadProjectsOnce() {
   projectsLoadedOnce = true;
 
   try {
-    const res = await fetch("/projects");
+    const res = await fetch("/projects", { cache: "no-store" });
     const data = await res.json().catch(() => ({}));
 
-    // ✅ server ULTRA v3.3: { ok:true, projects:[...] }
+    // server ULTRA v3.3: { ok:true, projects:[...] }
     const list =
       Array.isArray(data) ? data :
       Array.isArray(data?.projects) ? data.projects :
@@ -787,9 +823,7 @@ function stopFft() {
   if (fftAnim) cancelAnimationFrame(fftAnim);
   fftAnim = null;
   lastFftTs = 0;
-  if (fftCtx && fftCanvas) {
-    fftCtx.clearRect(0, 0, fftCanvas.width, fftCanvas.height);
-  }
+  if (fftCtx && fftCanvas) fftCtx.clearRect(0, 0, fftCanvas.width, fftCanvas.height);
 }
 
 function startFft() {
@@ -920,9 +954,7 @@ async function startListening() {
     const display = cleanStr(final || interim);
     if (!display) return;
 
-    if (voiceHint) {
-      voiceHint.textContent = `🗣️ ${display.slice(0, 80)}${display.length > 80 ? "…" : ""}`;
-    }
+    if (voiceHint) voiceHint.textContent = `🗣️ ${display.slice(0, 80)}${display.length > 80 ? "…" : ""}`;
 
     if (cleanStr(final)) {
       const { hasOver, cleanedText } = splitOnOver(final);
@@ -943,9 +975,8 @@ async function startListening() {
     }
   };
 
-  try {
-    recognition.start();
-  } catch (e) {
+  try { recognition.start(); }
+  catch (e) {
     console.error(e);
     addSystem("Voice start failed.");
   }
@@ -1015,9 +1046,7 @@ async function startRecording() {
 function stopRecording() {
   clearTimeout(recStopTimer);
   recStopTimer = null;
-  try {
-    if (recorder && recorder.state === "recording") recorder.stop();
-  } catch {}
+  try { if (recorder && recorder.state === "recording") recorder.stop(); } catch {}
 }
 
 /** =========================
@@ -1028,50 +1057,6 @@ function stopRecording() {
   ensureVoiceUI();
   setVoiceButtonState();
 })();
-
-/** =========================
- *  BOOTSTRAP PROJECTS
- *  ========================= */
-const last = restoreLastSession();
-let projectsLoadedOnce = false;
-
-async function loadProjectsOnce() {
-  if (projectsLoadedOnce) return;
-  projectsLoadedOnce = true;
-
-  try {
-    const res = await fetch("/projects");
-    const data = await res.json().catch(() => ({}));
-
-    const list =
-      Array.isArray(data) ? data :
-      Array.isArray(data?.projects) ? data.projects :
-      [];
-
-    if (list.length > 0) {
-      setProjectsOptions(list, true);
-      const want = cleanStr(last?.p);
-      if (want && list.includes(want)) projectSelect.value = want;
-      return;
-    }
-  } catch (_) {}
-
-  socket.emit("getProjects");
-}
-
-socket.on("connect", async () => {
-  console.log("✅ Connecté Socket.io", socket.id);
-  await loadProjectsOnce();
-
-  if (AUTO_JOIN) {
-    const u = cleanStr(usernameInput.value);
-    const p = cleanStr(projectSelect.value);
-    if (u && p && !currentProject) joinProject();
-  }
-});
-
-socket.on("disconnect", () => addSystem("Déconnecté du serveur…"));
-socket.on("connect_error", (err) => addSystem(`Erreur connexion: ${err.message}`));
 
 /** =========================
  *  BONUS: stop mic tracks on unload
