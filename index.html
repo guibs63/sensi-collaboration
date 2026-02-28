@@ -1,4 +1,5 @@
- ready) -->
+guibs:/index.html — ULTRA v3.4.3
+<!-- guibs:/index.html (COMPLET) — ULTRA v3.4.3 aligned (voice + FFT + projects compat) -->
 <!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -9,142 +10,28 @@
   <style>
     body{ font-family: Arial, sans-serif; margin:20px; max-width:1100px; }
     h1{ margin-bottom: 10px; }
-
     input, select, button{ padding:8px; font-size:14px; }
     button{ cursor:pointer; }
-
     .topbar{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
     .hint{ color:#666; font-size:12px; margin:6px 0 12px; }
-
     .layout{ display:grid; grid-template-columns:1fr 260px; gap:12px; align-items:start; }
     @media (max-width: 900px){ .layout{ grid-template-columns:1fr; } }
-
-    #chat{
-      border:1px solid #ccc;
-      height:460px;
-      overflow-y:auto;
-      padding:10px;
-      background:#fff;
-    }
-
+    #chat{ border:1px solid #ccc; height:460px; overflow-y:auto; padding:10px; background:#fff; }
     .msg{ margin-bottom:8px; line-height:1.35; word-break:break-word; }
     .msg .time{ color:#666; margin-right:6px; font-size:12px; }
     .msg.system{ color:#444; opacity:0.9; }
-
-    form#chat-form{
-      display:flex;
-      gap:8px;
-      align-items:center;
-      margin-top:12px;
-      flex-wrap:wrap;
-    }
-
+    form#chat-form{ display:flex; gap:8px; align-items:center; margin-top:12px; flex-wrap:wrap; }
     #message{ flex:1; min-width:220px; }
     #file{ max-width:340px; }
-
     .upload-state{ font-size:12px; color:#666; }
-
     .panel{ border:1px solid #ccc; background:#fff; padding:10px; border-radius:10px; }
     .panel h3{ margin:0 0 8px 0; font-size:15px; }
-    .badge{
-      display:inline-block;
-      padding:2px 8px;
-      border:1px solid #ddd;
-      border-radius:999px;
-      font-size:12px;
-      color:#444;
-      margin-left:6px;
-    }
-
+    .badge{ display:inline-block; padding:2px 8px; border:1px solid #ddd; border-radius:999px; font-size:12px; color:#444; margin-left:6px; }
     #users{ list-style:none; padding:0; margin:0; }
-    #users li{
-      padding:6px 8px;
-      border-bottom:1px solid #f0f0f0;
-      display:flex;
-      justify-content:space-between;
-      gap:8px;
-      align-items:center;
-    }
+    #users li{ padding:6px 8px; border-bottom:1px solid #f0f0f0; display:flex; justify-content:space-between; gap:8px; align-items:center; }
     #users li:last-child{ border-bottom:none; }
-
-    .dot{ width:8px; height:8px; border-radius:50%; background:#22c55e; display:inline-block; margin-right:8px; }
-    .userline{ display:flex; align-items:center; gap:6px; min-width:0; }
-    .uname{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:170px; display:inline-block; }
-
-    .danger{
-      border:1px solid #f2b8b5;
-      background:#fff5f5;
-    }
-
-    /* ===== Menu ⋮ messages ===== */
-    .msg-row{
-      display:flex;
-      justify-content:space-between;
-      gap:10px;
-      align-items:flex-start;
-    }
-    .msg-main{ flex:1; }
-    .msg-actions{ position:relative; flex:0 0 auto; }
-    .kebab{
-      padding:2px 8px;
-      border:1px solid #ddd;
-      background:#fff;
-      border-radius:6px;
-      line-height:1;
-    }
-    .menu{
-      position:absolute;
-      right:0;
-      top:28px;
-      min-width:160px;
-      background:#fff;
-      border:1px solid #ddd;
-      border-radius:10px;
-      box-shadow:0 10px 30px rgba(0,0,0,.08);
-      padding:6px;
-      z-index:50;
-    }
-    .menu-item{
-      width:100%;
-      text-align:left;
-      padding:8px 10px;
-      background:#fff;
-      border:0;
-      border-radius:8px;
-    }
-    .menu-item:hover{ background:#f3f4f6; }
-
-    /* ===== VOICE BAR (injectée par client.js) ===== */
-    #voice-bar{
-      margin-top:10px;
-      padding:10px;
-      border:1px solid rgba(0,0,0,.12);
-      border-radius:12px;
-      background:#fff;
-    }
-    #voice-bar button{
-      border:1px solid #ddd;
-      background:#fff;
-      border-radius:10px;
-    }
-    #voice-bar button:disabled{
-      opacity:.55;
-      cursor:not-allowed;
-    }
-    #voice-bar canvas{
-      display:block;
-    }
-
-    /* (Optionnel) mini statut */
-    #statusbar{
-      margin:8px 0 12px;
-      padding:8px 10px;
-      border:1px dashed rgba(0,0,0,.18);
-      border-radius:10px;
-      background:#fff;
-      font-size:12px;
-      color:#444;
-    }
+    .danger{ border:1px solid #f2b8b5; background:#fff5f5; }
+    #statusbar{ margin:8px 0 12px; padding:8px 10px; border:1px dashed rgba(0,0,0,.18); border-radius:10px; background:#fff; font-size:12px; color:#444; }
     #statusbar code{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
   </style>
 </head>
@@ -152,7 +39,6 @@
 <body>
   <h1>Sensi-IA_travail_collaboratif 🚀</h1>
 
-  <!-- (Optionnel) zone debug: tu peux la laisser, elle ne casse rien -->
   <div id="statusbar">
     Statut: <span id="status-text">chargement…</span>
   </div>
@@ -170,10 +56,10 @@
   </div>
 
   <div class="hint">
-    Chat + présence + projets temps réel.<br/>
+    Chat + projets temps réel.<br/>
     🎧 Reconnaissance vocale : dicte ton message et dis <strong>"over"</strong> pour envoyer automatiquement.<br/>
-    📊 Fréquences temps réel (FFT) affichées pendant l'écoute / l'enregistrement.<br/>
-    🎙️ Upload audio → transcription + analyse automatique par Sensi.
+    📊 FFT affichée pendant l'écoute / l'enregistrement.<br/>
+    🎙️ Envoi audio : Enregistrer → Envoyer audio.
   </div>
 
   <div class="layout">
@@ -186,15 +72,10 @@
         <button type="submit">Envoyer</button>
         <span class="upload-state" id="upload-state"></span>
       </form>
-
-      <!-- IMPORTANT:
-        La barre VOICE + le canvas FFT sont injectés par client.js juste après ce form.
-        (On ne met rien ici pour éviter les doublons.)
-      -->
     </div>
 
     <aside class="panel">
-      <h3>Users en ligne <span class="badge" id="users-count">0</span></h3>
+      <h3>Users en ligne <span class="badge" id="users-count">—</span></h3>
       <div class="hint" style="margin:0 0 8px;">
         Projet : <strong id="current-project-label">—</strong>
       </div>
@@ -202,27 +83,17 @@
     </aside>
   </div>
 
-  <!-- ✅ ordre important: socket.io puis ton client -->
   <script src="/socket.io/socket.io.js"></script>
   <script src="/client.js"></script>
 
-  <!-- Optionnel: affiche /health en bas (debug) -->
   <script>
     (async () => {
       const el = document.getElementById("status-text");
       try {
         const res = await fetch("/health", { cache: "no-store" });
         const data = await res.json();
-
-        const ai = data.ai || "unknown";
-        const ver = data.version || "?";
-        const web = data.web || "";
-        const deps = data.deps || {};
-        const hasJsdom = deps.jsdom ? "jsdom" : "no-jsdom";
-        const hasRead = deps.readability ? "readability" : "no-readability";
-
-        el.innerHTML = `OK ✅ | <code>${ver}</code> | AI: <code>${ai}</code> | Web: <code>${web}</code> | <code>${hasJsdom}</code>/<code>${hasRead}</code>`;
-      } catch (e) {
+        el.innerHTML = `OK ✅ | <code>${data.version || "?"}</code> | AI: <code>${data.ai || "?"}</code> | Web: <code>${data.web || ""}</code>`;
+      } catch {
         el.textContent = "offline / health unreachable";
       }
     })();

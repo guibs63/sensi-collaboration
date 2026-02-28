@@ -1,7 +1,8 @@
+guibs:/package.json — ULTRA v3.4.3
 {
   "name": "lietome",
   "version": "1.0.0",
-  "description": "SensiLive multi-project chat",
+  "description": "Sensi Live multi-project chat",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

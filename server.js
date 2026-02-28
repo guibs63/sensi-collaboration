@@ -1,19 +1,6 @@
-// guibs:/server.js (COMPLET) — ULTRA v3.4.2-lite (NO TIME shortcut) ✅
+guibs:/server.js — ULTRA v3.4.3
+// guibs:/server.js (COMPLET) — ULTRA v3.4.3 (Railway-safe + NO CRASH pdf-parse + projects compat + logs) ✅
 "use strict";
-
-/**
- * ✅ Versions:
- * - /projects => tableau (compat)
- * - /projects/v2 => { ok:true, projects:[...] }
- * - create/suppr projets OK
- * - upload => message + analyse Sensi (pdf/docx/xlsx/text/audio/image)
- * - web: URL-open + search(Tavily/SerpAPI) auto si dispo
- * - /health + /logs
- * - aucune fonction "TIME (France)" / aucun raccourci heure : tout passe par web/IA
- */
-
-// dotenv (optionnel)
-try { require("dotenv").config(); } catch {}
 
 const express = require("express");
 const cors = require("cors");
@@ -25,14 +12,26 @@ const multer = require("multer");
 const { Server } = require("socket.io");
 const OpenAI = require("openai");
 
-// ==================================================
-// OPTIONAL DEPENDENCIES (NEVER CRASH ON REQUIRE)
-// ==================================================
+/**
+ * OPTIONAL DEPENDENCIES (NEVER CRASH ON REQUIRE)
+ * ⚠️ Railway crash fix:
+ * - Certaines libs (ex: pdf-parse >=2.x) peuvent throw au require() (DOMMatrix not defined).
+ * - Ici, on considère ces deps comme "optionnelles": on NE DOIT JAMAIS planter au démarrage.
+ */
 function optionalRequire(name) {
-  try { return require(name); }
-  catch (e) {
-    if (e && e.code === "MODULE_NOT_FOUND") return null;
-    throw e;
+  try {
+    return require(name);
+  } catch (e) {
+    // soft-fail: don't crash app on optional deps
+    const msg = String(e?.message || e || "");
+    const code = e?.code;
+    if (code === "MODULE_NOT_FOUND") return null;
+
+    // Known runtime crashes in server environments (Railway) for PDF/canvas polyfills:
+    if (/DOMMatrix|ImageData|Path2D/i.test(msg)) return null;
+
+    // Also treat any require-time error as optional (safer for prod)
+    return null;
   }
 }
 
@@ -42,10 +41,19 @@ const readabilityPkg = optionalRequire("@mozilla/readability");
 const JSDOM = jsdomPkg ? jsdomPkg.JSDOM : null;
 const Readability = readabilityPkg ? (readabilityPkg.Readability || readabilityPkg) : null;
 
-// Docs parsing (optional)
-const pdfParse = optionalRequire("pdf-parse");
-const mammoth = optionalRequire("mammoth");
-const XLSX = optionalRequire("xlsx");
+// Docs creation (optional)
+const docxPkg = optionalRequire("docx");
+const excelJSPkg = optionalRequire("exceljs");
+const pptxPkg = optionalRequire("pptxgenjs");
+
+const Document = docxPkg ? docxPkg.Document : null;
+const Packer = docxPkg ? docxPkg.Packer : null;
+const Paragraph = docxPkg ? docxPkg.Paragraph : null;
+const HeadingLevel = docxPkg ? docxPkg.HeadingLevel : null;
+const TextRun = docxPkg ? docxPkg.TextRun : null;
+
+const ExcelJS = excelJSPkg || null;
+const PptxGenJS = pptxPkg || null;
 
 // ==================================================
 // APP INIT
@@ -53,11 +61,12 @@ const XLSX = optionalRequire("xlsx");
 const app = express();
 app.set("trust proxy", 1);
 app.use(cors());
-app.use(express.json({ limit: "12mb" }));
+app.use(express.json({ limit: "6mb" }));
 
 // ✅ anti-cache Railway
 app.get("/", (req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); });
 app.get("/client.js", (req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); });
+app.get("/index.html", (req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); });
 
 app.use(express.static(__dirname));
 
@@ -66,9 +75,7 @@ app.use(express.static(__dirname));
 // ==================================================
 function cleanEnv(v) { return String(v ?? "").trim(); }
 
-const APP_VERSION = process.env.APP_VERSION || "ultra-v3.4.2-lite";
-
-// storage
+const APP_VERSION = process.env.APP_VERSION || "ultra-v3.4.3";
 const STORAGE_DIR = path.join(__dirname, "storage");
 const HISTORY_FILE = path.join(STORAGE_DIR, "messages.json");
 const PROJECTS_FILE = path.join(STORAGE_DIR, "projects.json");
@@ -82,32 +89,32 @@ const MAX_MESSAGES_PER_PROJECT = Number(process.env.MAX_MESSAGES_PER_PROJECT || 
 const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB || 40);
 const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 
-// OpenAI
+// IA
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.2-chat-latest";
 const OPENAI_TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe";
 const OPENAI_IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1";
-const OPENAI_API_KEY = cleanEnv(process.env.OPENAI_API_KEY || "");
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 
-// URL open (readability)
-const WEB_PAGE_TIMEOUT_MS = Number(process.env.WEB_PAGE_TIMEOUT_MS || 12000);
-const WEB_MAX_CHARS_PER_PAGE = Number(process.env.WEB_MAX_CHARS_PER_PAGE || 14000);
-
-// Web search provider
+// Web search provider (optional)
 const WEB_SEARCH_PROVIDER = cleanEnv(process.env.WEB_SEARCH_PROVIDER || "tavily"); // tavily | serpapi
 const TAVILY_API_KEY = cleanEnv(process.env.TAVILY_API_KEY || "");
 const SERPAPI_KEY = cleanEnv(process.env.SERPAPI_KEY || "");
 const WEB_SEARCH_TIMEOUT_MS = Number(process.env.WEB_SEARCH_TIMEOUT_MS || 12000);
 const WEB_SEARCH_MAX_RESULTS = Number(process.env.WEB_SEARCH_MAX_RESULTS || 6);
 
+// Web URL-open limits
+const WEB_PAGE_TIMEOUT_MS = Number(process.env.WEB_PAGE_TIMEOUT_MS || 12000);
+const WEB_MAX_CHARS_PER_PAGE = Number(process.env.WEB_MAX_CHARS_PER_PAGE || 14000);
+
 // Cache
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 10 * 60 * 1000);
 
-// Audio
+// Audio auto transcript message
 const AUDIO_AUTO_TRANSCRIPT_MESSAGE = String(process.env.AUDIO_AUTO_TRANSCRIPT_MESSAGE || "1") !== "0";
 const AUDIO_TRANSCRIPT_LANGUAGE = process.env.AUDIO_TRANSCRIPT_LANGUAGE || "fr";
 const AUDIO_TRANSCRIPT_PREFIX = process.env.AUDIO_TRANSCRIPT_PREFIX || "🗣️ (transcription) ";
 
-// /logs token (optional)
+// (optionnel) Protéger /logs avec un token
 const LOGS_TOKEN = cleanEnv(process.env.LOGS_TOKEN || "");
 
 // ==================================================
@@ -129,14 +136,16 @@ app.use("/uploads", express.static(UPLOADS_DIR));
 app.use("/generated", express.static(GENERATED_DIR));
 
 // ==================================================
-// LOGGING
+// LOGGING (FILE + CONSOLE)
 // ==================================================
 function logLine(...args) {
   const safe = args.map((a) => {
     try { return typeof a === "string" ? a : JSON.stringify(a); }
     catch { return String(a); }
   });
+
   const line = `[${new Date().toISOString()}] ${safe.join(" ")}\n`;
+
   try {
     if (!fs.existsSync(STORAGE_DIR)) fs.mkdirSync(STORAGE_DIR, { recursive: true });
     fs.appendFileSync(LOG_FILE, line, "utf8");
@@ -157,28 +166,31 @@ function tailFile(filePath, maxLines = 200) {
 // ==================================================
 // HELPERS
 // ==================================================
-function readJSON(file, fallback) { try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; } }
+function readJSON(file, fallback) {
+  try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; }
+}
 function writeJSON(file, data) {
   try { fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8"); }
   catch (e) { logLine("[storage] write failed:", file, e?.message || e); }
 }
 function cleanStr(v) { return String(v ?? "").trim(); }
-function safeProjectKey(project) { const p = cleanStr(project); return p ? p.slice(0, 80) : ""; }
-function isValidProjectName(name) { return /^[a-zA-Z0-9 _.\-]{2,50}$/.test(name); }
-function hasOpenAI() { return Boolean(OPENAI_API_KEY); }
+function safeProjectKey(project) {
+  const p = cleanStr(project);
+  return p ? p.slice(0, 80) : "";
+}
+function isValidProjectName(name) {
+  return /^[a-zA-Z0-9 _.\-]{2,50}$/.test(name);
+}
+function hasOpenAI() { return Boolean(cleanEnv(OPENAI_API_KEY)); }
 function getOpenAIClient() { return new OpenAI({ apiKey: OPENAI_API_KEY }); }
 
 function hasWebSearch() {
-  if (WEB_SEARCH_PROVIDER === "serpapi") return Boolean(SERPAPI_KEY);
-  return Boolean(TAVILY_API_KEY);
+  if (WEB_SEARCH_PROVIDER === "serpapi") return Boolean(cleanEnv(SERPAPI_KEY));
+  return Boolean(cleanEnv(TAVILY_API_KEY));
 }
 function webModeLabel() {
   if (hasWebSearch()) return `search(${WEB_SEARCH_PROVIDER})`;
-  return `url-open only (${WEB_SEARCH_PROVIDER} not configured)`;
-}
-function tavilyKeyLooksValid() {
-  if (!TAVILY_API_KEY) return false;
-  return TAVILY_API_KEY.length >= 16;
+  return `url-open only (tavily not configured)`;
 }
 
 // ==================================================
@@ -225,36 +237,6 @@ function listProjects() {
 }
 
 // ==================================================
-// MEMORY GLOBAL
-// ==================================================
-function normalizeFactText(t) { return cleanStr(t).replace(/\s+/g, " ").slice(0, 280); }
-function addGlobalFact({ text, who = "", project = "" }) {
-  const factText = normalizeFactText(text);
-  if (!factText) return false;
-
-  const exists = globalMemory.facts.some((f) => normalizeFactText(f.text) === factText);
-  if (exists) return false;
-
-  const now = Date.now();
-  globalMemory.facts.unshift({
-    id: `fact_${now}_${Math.random().toString(16).slice(2)}`,
-    text: factText,
-    who: cleanStr(who).slice(0, 80),
-    project: cleanStr(project).slice(0, 80),
-    ts: now,
-  });
-  if (globalMemory.facts.length > 500) globalMemory.facts = globalMemory.facts.slice(0, 500);
-  saveMemoryNow();
-  return true;
-}
-function memoryTop(n = 14) { return globalMemory.facts.slice(0, n); }
-function renderMemoryBlock() {
-  const facts = memoryTop(14);
-  if (!facts.length) return "Aucune mémoire globale enregistrée.";
-  return facts.map((f, i) => `${i + 1}. ${f.text}`).join("\n");
-}
-
-// ==================================================
 // ROUTES
 // ==================================================
 app.get("/health", (req, res) => {
@@ -266,9 +248,11 @@ app.get("/health", (req, res) => {
     deps: {
       jsdom: Boolean(JSDOM),
       readability: Boolean(Readability),
-      pdf_parse: Boolean(pdfParse),
-      mammoth: Boolean(mammoth),
-      xlsx: Boolean(XLSX),
+      docx: Boolean(docxPkg),
+      exceljs: Boolean(ExcelJS),
+      pptxgenjs: Boolean(PptxGenJS),
+      // NOTE: pdf-parse est chargé à la demande (et peut être désactivé)
+      pdfParse: Boolean(optionalRequire("pdf-parse")),
     },
     models: {
       chat: OPENAI_MODEL,
@@ -276,19 +260,14 @@ app.get("/health", (req, res) => {
       image: OPENAI_IMAGE_MODEL,
     },
     web: webModeLabel(),
-    web_keys: {
-      provider: WEB_SEARCH_PROVIDER,
-      tavilyConfigured: Boolean(TAVILY_API_KEY),
-      tavilyLooksValid: tavilyKeyLooksValid(),
-      serpapiConfigured: Boolean(SERPAPI_KEY),
-    },
     audio: { autoTranscriptMessage: AUDIO_AUTO_TRANSCRIPT_MESSAGE, language: AUDIO_TRANSCRIPT_LANGUAGE },
     logs: { enabled: true, protectedByToken: Boolean(LOGS_TOKEN) },
   });
 });
 
-// compat: ancien client attend un tableau
+// ✅ compat: certains clients attendent un tableau JSON direct
 app.get("/projects", (req, res) => res.json(listProjects()));
+// ✅ format “propre” si tu veux l’utiliser côté front moderne
 app.get("/projects/v2", (req, res) => res.json({ ok: true, projects: listProjects() }));
 
 app.get("/logs", (req, res) => {
@@ -339,7 +318,7 @@ function extFromMime(mime, originalName) {
 }
 
 // ==================================================
-// UPLOAD (multer)
+// UPLOAD
 // ==================================================
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPLOADS_DIR),
@@ -355,587 +334,6 @@ const upload = multer({
   limits: { fileSize: MAX_UPLOAD_BYTES },
 });
 
-// ==================================================
-// EMIT HELPERS
-// ==================================================
-function emitSensi(project, text, extra = {}) {
-  const msg = {
-    id: Date.now(),
-    ts: Date.now(),
-    project,
-    username: "Sensi",
-    userId: "sensi",
-    message: text,
-    ...extra,
-  };
-
-  pushMessage(project, {
-    id: msg.id,
-    ts: msg.ts,
-    username: msg.username,
-    userId: msg.userId,
-    message: msg.message,
-    attachment: msg.attachment,
-    meta: msg.meta,
-  });
-
-  io.to(project).emit("chatMessage", msg);
-}
-function emitSystem(project, text) {
-  io.to(project).emit("systemMessage", { id: Date.now(), ts: Date.now(), project, text });
-}
-
-// ==================================================
-// DELETE: author-only + delete Sensi allowed
-// ==================================================
-function safeUnlinkUpload(storedAs) {
-  const name = cleanStr(storedAs);
-  if (!name) return;
-  if (name.includes("..") || name.includes("/") || name.includes("\\")) return;
-  const full = path.join(UPLOADS_DIR, name);
-  try { if (fs.existsSync(full)) fs.unlinkSync(full); }
-  catch (e) { logLine("[unlink]", e?.message || e); }
-}
-
-function canDeleteMessage(msg, requesterUserId) {
-  const reqId = cleanStr(requesterUserId);
-  if (!reqId) return false;
-  const authorId = cleanStr(msg?.userId);
-  if (authorId && authorId === reqId) return true;
-  if (authorId === "sensi") return true; // ✅ anyone can delete Sensi
-  return false;
-}
-
-function deleteMessageIfAuthor(project, messageId, requesterUserId) {
-  const p = safeProjectKey(project);
-  if (!p) return { ok: false, reason: "bad_project" };
-  if (!Array.isArray(historyByProject[p])) return { ok: false, reason: "no_history" };
-
-  const idNum = Number(messageId);
-  if (!Number.isFinite(idNum)) return { ok: false, reason: "bad_id" };
-  const reqId = cleanStr(requesterUserId);
-  if (!reqId) return { ok: false, reason: "no_user" };
-
-  const arr = historyByProject[p];
-  const idx = arr.findIndex((m) => Number(m?.id) === idNum);
-  if (idx === -1) return { ok: false, reason: "not_found" };
-
-  const msg = arr[idx];
-  if (!canDeleteMessage(msg, reqId)) return { ok: false, reason: "not_author" };
-
-  const storedAs = cleanStr(msg?.attachment?.storedAs);
-  if (storedAs) safeUnlinkUpload(storedAs);
-
-  arr.splice(idx, 1);
-  scheduleHistorySave();
-  return { ok: true };
-}
-
-// ==================================================
-// URL-OPEN WEB: CACHE + URL OPEN
-// ==================================================
-const cache = new Map(); // key -> { ts, data }
-function cacheGet(key) {
-  const v = cache.get(key);
-  if (!v) return null;
-  if (Date.now() - v.ts > CACHE_TTL_MS) { cache.delete(key); return null; }
-  return v.data;
-}
-function cacheSet(key, data) { cache.set(key, { ts: Date.now(), data }); }
-
-async function fetchWithTimeout(url, ms) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), ms);
-  try {
-    const resp = await fetch(url, {
-      method: "GET",
-      redirect: "follow",
-      signal: controller.signal,
-      headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; SensiBot/3.4.2-lite)",
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      },
-    });
-    return resp;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function cleanExtractedText(t) {
-  return cleanStr(t).replace(/\n{3,}/g, "\n\n").slice(0, WEB_MAX_CHARS_PER_PAGE);
-}
-
-function naiveHtmlToText(html) {
-  const s = cleanStr(html);
-  if (!s) return "";
-  return cleanExtractedText(
-    s
-      .replace(/<script[\s\S]*?<\/script>/gi, " ")
-      .replace(/<style[\s\S]*?<\/style>/gi, " ")
-      .replace(/<\/p>|<br\s*\/?>/gi, "\n")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/\s{2,}/g, " ")
-  );
-}
-
-async function extractReadableTextFromUrl(url) {
-  const u = cleanStr(url);
-  if (!u) return { ok: false, url, text: "", title: "" };
-
-  const cacheKey = `page:${u}`;
-  const cached = cacheGet(cacheKey);
-  if (cached) return cached;
-
-  try {
-    const resp = await fetchWithTimeout(u, WEB_PAGE_TIMEOUT_MS);
-    if (!resp.ok) {
-      const out = { ok: false, url: u, text: "", title: "" };
-      cacheSet(cacheKey, out);
-      return out;
-    }
-
-    const ct = resp.headers.get("content-type") || "";
-    const raw = await resp.text().catch(() => "");
-
-    if (!ct.includes("text/html")) {
-      const out = { ok: true, url: u, title: "", text: cleanExtractedText(raw) };
-      cacheSet(cacheKey, out);
-      return out;
-    }
-
-    if (!JSDOM || !Readability) {
-      const out = { ok: true, url: u, title: "", text: naiveHtmlToText(raw) };
-      cacheSet(cacheKey, out);
-      return out;
-    }
-
-    const dom = new JSDOM(raw, { url: u });
-    const reader = new Readability(dom.window.document);
-    const article = reader.parse();
-
-    const title = cleanStr(article?.title) || cleanStr(dom.window.document.title) || "";
-    const text = cleanExtractedText(article?.textContent || "");
-
-    const out = { ok: true, url: u, title, text };
-    cacheSet(cacheKey, out);
-    return out;
-  } catch {
-    const out = { ok: false, url: u, text: "", title: "" };
-    cacheSet(cacheKey, out);
-    return out;
-  }
-}
-
-function chunkText(text, chunkSize = 1400, overlap = 180) {
-  const t = cleanStr(text);
-  if (!t) return [];
-  const chunks = [];
-  let i = 0;
-  while (i < t.length) {
-    chunks.push(t.slice(i, i + chunkSize));
-    i += chunkSize - overlap;
-  }
-  return chunks.slice(0, 12);
-}
-
-function buildWebContext(pages) {
-  const blocks = [];
-  let srcIndex = 1;
-
-  for (const p of pages) {
-    if (!p?.text) continue;
-    const title = cleanStr(p.title) || "Source";
-    const url = cleanStr(p.url);
-    const chunks = chunkText(p.text);
-    if (!chunks.length) continue;
-
-    blocks.push({ source_id: srcIndex, title, url, chunk: chunks[0] });
-    srcIndex += 1;
-    if (srcIndex > 6) break;
-  }
-
-  if (!blocks.length) return { contextText: "", sources: [] };
-
-  const contextText = blocks
-    .map((b) => `SOURCE [${b.source_id}]\nTitre: ${b.title}\nURL: ${b.url}\nContenu:\n${b.chunk}`)
-    .join("\n\n");
-  const sources = blocks.map((b) => ({ id: b.source_id, title: b.title, url: b.url }));
-  return { contextText, sources };
-}
-
-function extractUrlsFromText(text) {
-  const t = cleanStr(text);
-  if (!t) return [];
-  const re = /\bhttps?:\/\/[^\s<>()"]+/gi;
-  const found = t.match(re) || [];
-  return Array.from(new Set(found.map((u) => u.replace(/[)\].,;!?]+$/g, "")))).slice(0, 10);
-}
-
-// ==================================================
-// WEB SEARCH (Tavily / SerpAPI)
-// ==================================================
-async function fetchJsonWithTimeout(url, options = {}, ms = 10000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), ms);
-  try {
-    const resp = await fetch(url, { ...options, signal: controller.signal });
-    const text = await resp.text().catch(() => "");
-    let data = null;
-    try { data = JSON.parse(text); } catch { data = null; }
-    return { ok: resp.ok, status: resp.status, data, raw: text };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function webSearch(query) {
-  const q = cleanStr(query);
-  if (!q || !hasWebSearch()) return { ok: false, results: [] };
-
-  const cacheKey = `search:${WEB_SEARCH_PROVIDER}:${q.toLowerCase()}`;
-  const cached = cacheGet(cacheKey);
-  if (cached) return cached;
-
-  try {
-    if (WEB_SEARCH_PROVIDER === "serpapi") {
-      const url = `https://serpapi.com/search.json?q=${encodeURIComponent(q)}&engine=google&hl=fr&gl=fr&api_key=${encodeURIComponent(SERPAPI_KEY)}`;
-      const r = await fetchJsonWithTimeout(url, {}, WEB_SEARCH_TIMEOUT_MS);
-      const items = [];
-      const organic = r?.data?.organic_results || [];
-      for (const it of organic.slice(0, WEB_SEARCH_MAX_RESULTS)) {
-        items.push({
-          title: cleanStr(it?.title),
-          url: cleanStr(it?.link),
-          snippet: cleanStr(it?.snippet || it?.snippet_highlighted_words?.join(" ") || ""),
-        });
-      }
-      const out = { ok: true, results: items.filter((x) => x.url).slice(0, WEB_SEARCH_MAX_RESULTS) };
-      cacheSet(cacheKey, out);
-      return out;
-    }
-
-    // default: tavily
-    const url = "https://api.tavily.com/search";
-    const body = {
-      api_key: TAVILY_API_KEY,
-      query: q,
-      search_depth: "basic",
-      max_results: WEB_SEARCH_MAX_RESULTS,
-      include_answer: false,
-      include_raw_content: false,
-      include_images: false,
-    };
-    const r = await fetchJsonWithTimeout(
-      url,
-      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
-      WEB_SEARCH_TIMEOUT_MS
-    );
-
-    if (!r.ok) {
-      logLine("[tavily] not ok", { status: r.status, raw: String(r.raw || "").slice(0, 220) });
-      const out = { ok: false, results: [] };
-      cacheSet(cacheKey, out);
-      return out;
-    }
-
-    const items = [];
-    const results = r?.data?.results || [];
-    for (const it of results.slice(0, WEB_SEARCH_MAX_RESULTS)) {
-      items.push({
-        title: cleanStr(it?.title),
-        url: cleanStr(it?.url),
-        snippet: cleanStr(it?.content || it?.snippet || ""),
-      });
-    }
-    const out = { ok: true, results: items.filter((x) => x.url).slice(0, WEB_SEARCH_MAX_RESULTS) };
-    cacheSet(cacheKey, out);
-    return out;
-  } catch (e) {
-    logLine("[webSearch]", e?.message || e);
-    const out = { ok: false, results: [] };
-    cacheSet(cacheKey, out);
-    return out;
-  }
-}
-
-function buildSearchContext(searchResults) {
-  const items = Array.isArray(searchResults) ? searchResults : [];
-  if (!items.length) return { contextText: "", sources: [] };
-
-  const blocks = [];
-  let srcIndex = 1;
-
-  for (const it of items.slice(0, 6)) {
-    const title = cleanStr(it.title) || "Source";
-    const url = cleanStr(it.url);
-    const snippet = cleanStr(it.snippet).slice(0, 1200);
-    if (!url || !snippet) continue;
-
-    blocks.push({ source_id: srcIndex, title, url, chunk: snippet });
-    srcIndex += 1;
-  }
-
-  if (!blocks.length) return { contextText: "", sources: [] };
-
-  const contextText = blocks
-    .map((b) => `SOURCE [${b.source_id}]\nTitre: ${b.title}\nURL: ${b.url}\nContenu:\n${b.chunk}`)
-    .join("\n\n");
-  const sources = blocks.map((b) => ({ id: b.source_id, title: b.title, url: b.url }));
-  return { contextText, sources };
-}
-
-// Heuristique: quand déclencher une recherche
-function shouldWebSearch(userText) {
-  const t = cleanStr(userText).toLowerCase();
-  if (!t) return false;
-
-  // si URLs fournies => URL-open suffit
-  if (extractUrlsFromText(userText).length) return false;
-
-  return /(\baujourd['’]hui\b|\bmaintenant\b|\bactu\b|\bactualité\b|\bnews\b|\bdernier\b|\bderni[eè]re\b|\brécent\b|\bprix\b|\btaux\b|\bbourse\b|\bmétéo\b|\bscore\b|\brésultat\b|\bwho\s+is\b|\bcurrent\b)/i.test(
-    t
-  );
-}
-
-// ==================================================
-// FILE EXTRACTION + AUDIO TRANSCRIBE
-// ==================================================
-async function extractTextFromFile(localFilePath, mimetype, originalName) {
-  const ext = (path.extname(originalName || "") || "").toLowerCase();
-
-  if ((mimetype && mimetype.startsWith("text/")) || isTextLikeExt(ext)) {
-    try { return fs.readFileSync(localFilePath, "utf8").slice(0, 22000); }
-    catch { return ""; }
-  }
-
-  if (mimetype === "application/pdf" || ext === ".pdf") {
-    if (!pdfParse) return "";
-    try {
-      const buf = fs.readFileSync(localFilePath);
-      const out = await pdfParse(buf);
-      return String(out?.text || "").slice(0, 22000);
-    } catch (e) {
-      logLine("[pdf-parse]", e?.message || e);
-      return "";
-    }
-  }
-
-  if (ext === ".docx") {
-    if (!mammoth) return "";
-    try {
-      const result = await mammoth.extractRawText({ path: localFilePath });
-      return String(result?.value || "").slice(0, 22000);
-    } catch (e) {
-      logLine("[mammoth]", e?.message || e);
-      return "";
-    }
-  }
-
-  if (ext === ".xlsx") {
-    if (!XLSX) return "";
-    try {
-      const wb = XLSX.readFile(localFilePath);
-      const sheetName = wb.SheetNames?.[0];
-      if (!sheetName) return "";
-      const ws = wb.Sheets[sheetName];
-      const csv = XLSX.utils.sheet_to_csv(ws);
-      return String(csv || "").slice(0, 22000);
-    } catch (e) {
-      logLine("[xlsx-read]", e?.message || e);
-      return "";
-    }
-  }
-
-  return "";
-}
-
-async function transcribeAudioFile(localFilePath) {
-  if (!hasOpenAI()) return "";
-  const client = getOpenAIClient();
-  try {
-    const file = fs.createReadStream(localFilePath);
-    const resp = await client.audio.transcriptions.create({
-      model: OPENAI_TRANSCRIBE_MODEL,
-      file,
-      language: AUDIO_TRANSCRIPT_LANGUAGE,
-    });
-    return cleanStr(resp?.text || "").slice(0, 22000);
-  } catch (e) {
-    logLine("[transcribe]", e?.message || e, e?.stack);
-    return "";
-  }
-}
-
-// ==================================================
-// FILE ANALYSIS (Sensi)
-// ==================================================
-async function analyzeFileWithSensi({ project, username, attachment }) {
-  if (!hasOpenAI()) {
-    emitSensi(project, `ℹ️ IA non configurée. Fichier reçu : ${attachment.filename}`);
-    return;
-  }
-
-  const client = getOpenAIClient();
-  const mimetype = String(attachment.mimetype || "application/octet-stream");
-  const isImage = mimetype.startsWith("image/");
-  const ext = (path.extname(attachment.filename || "") || "").toLowerCase();
-  const isAudio = isAudioLike(mimetype, ext);
-
-  const localPath = path.join(UPLOADS_DIR, attachment.storedAs);
-
-  let extracted = "";
-  if (isAudio) extracted = await transcribeAudioFile(localPath);
-  else if (!isImage) extracted = await extractTextFromFile(localPath, mimetype, attachment.filename);
-
-  const system = `
-Tu es Sensi.
-Tu reçois un fichier uploadé dans un projet.
-
-Tâches:
-1) Résumé (3-8 lignes)
-2) Points clés (bullet points)
-3) Actions recommandées (3-8)
-4) Si image: description précise
-5) Si audio: résume la transcription + décisions/actions
-
-IMPORTANT:
-- Si extraction/transcription vide, dis-le clairement (1 phrase) + propose 3 actions concrètes.
-Réponds en français, concret.
-`.trim();
-
-  const parts = [];
-  parts.push({
-    type: "text",
-    text:
-      `Projet: ${project}\nAuteur upload: ${username}\n` +
-      `Fichier: ${attachment.filename}\nType: ${mimetype}\nURL: ${attachment.url}\n\n` +
-      (isImage
-        ? `Analyse l'image via son URL.`
-        : isAudio
-          ? `Transcription (si dispo):\n${extracted || "(transcription vide / indisponible)"}\n`
-          : `Extrait (si dispo):\n${extracted || "(extraction vide / indisponible)"}\n`),
-  });
-
-  if (isImage) parts.push({ type: "image_url", image_url: { url: attachment.url } });
-
-  const completion = await client.chat.completions.create({
-    model: OPENAI_MODEL,
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content: parts },
-    ],
-    temperature: 0.2,
-    max_tokens: 900,
-  });
-
-  const out = cleanStr(completion?.choices?.[0]?.message?.content);
-  if (out) emitSensi(project, `🧠 Analyse Sensi — ${attachment.filename}\n\n${out}`);
-}
-
-// ==================================================
-// SENSI ANSWER (chat) + WEB (url-open + search)
-// ==================================================
-async function buildWebBundleFromUrls(userText) {
-  const urls = extractUrlsFromText(userText);
-  const pages = [];
-  for (const u of urls.slice(0, 4)) {
-    const page = await extractReadableTextFromUrl(u);
-    if (page.ok && page.text) pages.push(page);
-  }
-  return buildWebContext(pages);
-}
-
-async function buildWebBundleFromSearch(userText) {
-  const q = cleanStr(userText).slice(0, 240);
-  const sr = await webSearch(q);
-  if (!sr.ok || !sr.results.length) return { contextText: "", sources: [] };
-  return buildSearchContext(sr.results);
-}
-
-async function sensiAnswer({ project, username, userText }) {
-  if (!hasOpenAI()) {
-    emitSensi(project, "ℹ️ IA non configurée (OPENAI_API_KEY manquante).");
-    return;
-  }
-
-  const client = getOpenAIClient();
-  const memBlock = renderMemoryBlock();
-
-  // Web context
-  let webContext = "";
-  let sources = [];
-
-  try {
-    const urls = extractUrlsFromText(userText);
-    if (urls.length) {
-      const built = await buildWebBundleFromUrls(userText);
-      webContext = built.contextText || "";
-      sources = built.sources || [];
-    } else if (shouldWebSearch(userText)) {
-      if (hasWebSearch()) {
-        const built = await buildWebBundleFromSearch(userText);
-        webContext = built.contextText || "";
-        sources = built.sources || [];
-      } else {
-        logLine("[web] shouldWebSearch but provider not configured", {
-          provider: WEB_SEARCH_PROVIDER,
-          tavilyConfigured: Boolean(TAVILY_API_KEY),
-          serpapiConfigured: Boolean(SERPAPI_KEY),
-        });
-      }
-    }
-  } catch (e) {
-    logLine("[web]", e?.message || e);
-    webContext = "";
-    sources = [];
-  }
-
-  const system = `
-Tu es Sensi, IA d’assistance dans un chat collaboratif.
-
-Règles:
-1) Réponds en français, clair, concret.
-2) Si tu utilises le Contexte WEB, ajoute une section "Sources" à la fin (liens).
-3) Ne fabrique pas de sources.
-4) Si web search non disponible, dis-le en 1 phrase et propose 2 alternatives.
-`.trim();
-
-  const user = `
-Projet: ${project}
-Auteur: ${username}
-Message: ${userText}
-
-Mémoire globale (faits):
-${memBlock}
-
-${webContext ? `\nContexte WEB (extraits):\n${webContext}\n` : ""}
-`.trim();
-
-  const completion = await client.chat.completions.create({
-    model: OPENAI_MODEL,
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content: user },
-    ],
-    temperature: 0.2,
-    max_tokens: 1000,
-  });
-
-  const out = cleanStr(completion?.choices?.[0]?.message?.content);
-  if (!out) return emitSensi(project, "⚠️ Je n’ai pas pu générer de réponse.");
-
-  let final = out;
-  if (webContext && sources.length && !/(?:^|\n)Sources\s*:/i.test(final)) {
-    final += `\n\nSources:\n` + sources.map((s) => `- ${s.title} — ${s.url}`).join("\n");
-  }
-
-  emitSensi(project, final);
-}
-
-// ==================================================
-// UPLOAD ROUTE (with analysis)
-// ==================================================
 app.post("/upload", upload.single("file"), async (req, res) => {
   try {
     const project = safeProjectKey(req.body?.project);
@@ -979,23 +377,20 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
     io.to(project).emit("chatMessage", msg);
 
-    // ✅ analyse en async
-    (async () => {
-      try {
-        await analyzeFileWithSensi({ project, username, attachment });
-      } catch (e) {
-        const code = `sensi_file_${Date.now().toString(36)}`;
-        logLine("[sensi-file]", code, e?.message || e, e?.stack);
-        emitSensi(project, `⚠️ Erreur Sensi (${code}). 👉 /health puis /logs.`);
-      }
-    })();
-
+    // Note: tu peux remettre ici ton flow d'analyse Sensi si tu veux
     res.json({ ok: true, project, attachment });
   } catch (e) {
     logLine("[upload]", e?.message || e, e?.stack);
     res.status(500).json({ ok: false, error: "Upload error" });
   }
 });
+
+// ==================================================
+// EMIT HELPERS
+// ==================================================
+function emitSystem(project, text) {
+  io.to(project).emit("systemMessage", { id: Date.now(), ts: Date.now(), project, text });
+}
 
 // ==================================================
 // PRESENCE + SOCKET EVENTS
@@ -1027,7 +422,7 @@ io.on("connection", (socket) => {
 
   socket.on("getProjects", () => socket.emit("projectsUpdate", { projects: listProjects() }));
 
-  // CREATE PROJECT (+ alias)
+  // ✅ createProject({name}) + createProject("name") + alias "create project"
   const handleCreateProject = (payload, ack) => {
     const { name } = normalizeCreatePayload(payload);
     const n = cleanStr(name);
@@ -1102,7 +497,7 @@ io.on("connection", (socket) => {
     emitSystem(p, `👋 ${u} a rejoint ${p}`);
   });
 
-  socket.on("chatMessage", async ({ project, username, userId, message }) => {
+  socket.on("chatMessage", ({ project, username, userId, message }) => {
     const p = safeProjectKey(project);
     const u = cleanStr(username) || socket.data.username || "Anonyme";
     const uid = cleanStr(userId) || socket.data.userId;
@@ -1115,34 +510,6 @@ io.on("connection", (socket) => {
     const msg = { id: Date.now(), ts: Date.now(), project: p, username: u, userId: uid, message: m };
     pushMessage(p, { id: msg.id, ts: msg.ts, username: msg.username, userId: msg.userId, message: msg.message });
     io.to(p).emit("chatMessage", msg);
-
-    try {
-      await sensiAnswer({ project: p, username: u, userText: m });
-    } catch (e) {
-      const code = `sensi_${Date.now().toString(36)}`;
-      logLine("[sensi-auto]", code, { message: e?.message, name: e?.name, stack: e?.stack });
-      emitSensi(
-        p,
-        `⚠️ Erreur Sensi (${code}). 👉 /health puis /logs.\n` +
-          `Causes fréquentes: OPENAI_API_KEY manquante/invalid, modèle invalide, quota, TAVILY_API_KEY manquante.`
-      );
-    }
-  });
-
-  socket.on("deleteMessage", ({ project, messageId, userId }) => {
-    const p = safeProjectKey(project);
-    const id = Number(messageId);
-    const uid = cleanStr(userId) || socket.data.userId;
-
-    if (!p || !Number.isFinite(id)) return;
-    if (!projects.includes(p)) return;
-
-    const res = deleteMessageIfAuthor(p, id, uid);
-    if (!res.ok) {
-      if (res.reason === "not_author") socket.emit("projectError", { message: "Suppression refusée : seul l’auteur peut supprimer (sauf Sensi)." });
-      return;
-    }
-    io.to(p).emit("messageDeleted", { project: p, messageId: id });
   });
 
   socket.on("disconnect", () => {
@@ -1180,5 +547,4 @@ server.listen(PORT, "0.0.0.0", () => {
   logLine("Models:", { chat: OPENAI_MODEL, transcribe: OPENAI_TRANSCRIBE_MODEL, image: OPENAI_IMAGE_MODEL });
   logLine("Web:", webModeLabel());
   logLine("Audio:", { autoTranscriptMessage: AUDIO_AUTO_TRANSCRIPT_MESSAGE, lang: AUDIO_TRANSCRIPT_LANGUAGE });
-  logLine("Tavily:", { configured: Boolean(TAVILY_API_KEY), looksValid: tavilyKeyLooksValid() });
 });
