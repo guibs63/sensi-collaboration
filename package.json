@@ -1,9 +1,12 @@
 
+Sensi — package.json (STRICT VALID JSON — Railway FIX)
+Chemin: guibs:/package.json
+
 {
-  "name": "sensi",
+  "name": "lietome",
   "version": "1.0.0",
   "private": true,
-  "description": "Sensi Live collaborative AI chat (multi-project)",
+  "description": "Lietome Live multi-project chat",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
@@ -19,7 +22,7 @@
     "express": "^4.19.2",
     "jsdom": "^24.0.0",
     "multer": "^1.4.5-lts.1",
-    "openai": "^4.7.0",
+    "openai": "^4.0.0",
     "socket.io": "^4.7.5"
   }
 }
