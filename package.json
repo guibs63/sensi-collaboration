@@ -1,11 +1,13 @@
+Sensi — package.json (STRICT VALID JSON — Railway FIX)
+Chemin: guibs:/package.json
 
-
-guibs:/package.json — ULTRA v3.4.3
 {
   "name": "lietome",
   "version": "1.0.0",
+  "private": true,
   "description": "Lietome Live multi-project chat",
   "main": "server.js",
+  "type": "commonjs",
   "scripts": {
     "start": "node server.js"
   },
@@ -15,16 +17,11 @@ guibs:/package.json — ULTRA v3.4.3
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
     "cors": "^2.8.5",
-    "docx": "^9.5.0",
-    "dotenv": "^17.3.1",
-    "exceljs": "^4.4.0",
-    "express": "^5.2.1",
-    "jsdom": "^26.1.0",
-    "mammoth": "^1.11.0",
-    "multer": "^2.0.2",
-    "openai": "^6.25.0",
-    "pdf-parse": "^2.4.5",
-    "socket.io": "^4.8.3",
-    "xlsx": "^0.18.5"
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsdom": "^24.0.0",
+    "multer": "^1.4.5-lts.1",
+    "openai": "^4.0.0",
+    "socket.io": "^4.7.5"
   }
 }
