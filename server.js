@@ -1,4 +1,4 @@
-// guibs:/server.js (COMPLET) — ULTRA v3.1 (Railway-safe, URL-only web + audio upload + auto-transcript message) ✅
+// guibs:/server.js (COMPLET) — ULTRA v3.3 (Railway-safe + LOG FILE + /logs endpoint + better Sensi error codes) ✅
 "use strict";
 
 const express = require("express");
@@ -66,11 +66,13 @@ app.use(express.static(__dirname));
 // ==================================================
 // CONFIG
 // ==================================================
-const APP_VERSION = process.env.APP_VERSION || "ultra-v3.1-audio-over-fft";
+const APP_VERSION = process.env.APP_VERSION || "ultra-v3.3-logs";
 const STORAGE_DIR = path.join(__dirname, "storage");
 const HISTORY_FILE = path.join(STORAGE_DIR, "messages.json");
 const PROJECTS_FILE = path.join(STORAGE_DIR, "projects.json");
 const MEMORY_FILE = path.join(STORAGE_DIR, "global_memory.json");
+const LOG_FILE = path.join(STORAGE_DIR, "logs.txt");
+
 const UPLOADS_DIR = path.join(__dirname, "uploads");
 const GENERATED_DIR = path.join(__dirname, "generated");
 
@@ -91,10 +93,13 @@ const WEB_MAX_CHARS_PER_PAGE = Number(process.env.WEB_MAX_CHARS_PER_PAGE || 1400
 // Cache
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 10 * 60 * 1000);
 
-// ✅ Audio: auto-poster la transcription comme message utilisateur
+// Audio auto transcript message
 const AUDIO_AUTO_TRANSCRIPT_MESSAGE = String(process.env.AUDIO_AUTO_TRANSCRIPT_MESSAGE || "1") !== "0";
-const AUDIO_TRANSCRIPT_LANGUAGE = process.env.AUDIO_TRANSCRIPT_LANGUAGE || "fr"; // "fr" conseillé vu ton usage
+const AUDIO_TRANSCRIPT_LANGUAGE = process.env.AUDIO_TRANSCRIPT_LANGUAGE || "fr";
 const AUDIO_TRANSCRIPT_PREFIX = process.env.AUDIO_TRANSCRIPT_PREFIX || "🗣️ (transcription) ";
+
+// (optionnel) Protéger /logs avec un token
+const LOGS_TOKEN = cleanEnv(process.env.LOGS_TOKEN || "");
 
 // ==================================================
 // INIT DIRS
@@ -107,11 +112,42 @@ function ensureDirs() {
   if (!fs.existsSync(HISTORY_FILE)) fs.writeFileSync(HISTORY_FILE, JSON.stringify({}, null, 2), "utf8");
   if (!fs.existsSync(PROJECTS_FILE)) fs.writeFileSync(PROJECTS_FILE, JSON.stringify(["test"], null, 2), "utf8");
   if (!fs.existsSync(MEMORY_FILE)) fs.writeFileSync(MEMORY_FILE, JSON.stringify({ facts: [] }, null, 2), "utf8");
+  if (!fs.existsSync(LOG_FILE)) fs.writeFileSync(LOG_FILE, "", "utf8");
 }
 ensureDirs();
 
 app.use("/uploads", express.static(UPLOADS_DIR));
 app.use("/generated", express.static(GENERATED_DIR));
+
+// ==================================================
+// LOGGING (FILE + CONSOLE)
+// ==================================================
+function cleanEnv(v) { return String(v ?? "").trim(); }
+
+function logLine(...args) {
+  const safe = args.map((a) => {
+    try { return typeof a === "string" ? a : JSON.stringify(a); }
+    catch { return String(a); }
+  });
+
+  const line = `[${new Date().toISOString()}] ${safe.join(" ")}\n`;
+
+  try {
+    if (!fs.existsSync(STORAGE_DIR)) fs.mkdirSync(STORAGE_DIR, { recursive: true });
+    fs.appendFileSync(LOG_FILE, line, "utf8");
+  } catch {}
+  console.log(...args);
+}
+
+function tailFile(filePath, maxLines = 200) {
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    const lines = raw.split("\n");
+    return lines.slice(Math.max(0, lines.length - maxLines)).join("\n");
+  } catch {
+    return "";
+  }
+}
 
 // ==================================================
 // HELPERS
@@ -121,7 +157,7 @@ function readJSON(file, fallback) {
 }
 function writeJSON(file, data) {
   try { fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8"); }
-  catch (e) { console.error("[storage] write failed:", file, e); }
+  catch (e) { logLine("[storage] write failed:", file, e?.message || e); }
 }
 function cleanStr(v) { return String(v ?? "").trim(); }
 function safeProjectKey(project) {
@@ -233,14 +269,25 @@ app.get("/health", (req, res) => {
       image: OPENAI_IMAGE_MODEL,
     },
     web: "url-only (no search provider)",
-    audio: {
-      autoTranscriptMessage: AUDIO_AUTO_TRANSCRIPT_MESSAGE,
-      language: AUDIO_TRANSCRIPT_LANGUAGE,
-    },
+    audio: { autoTranscriptMessage: AUDIO_AUTO_TRANSCRIPT_MESSAGE, language: AUDIO_TRANSCRIPT_LANGUAGE },
+    logs: { enabled: true, protectedByToken: Boolean(LOGS_TOKEN) },
   });
 });
 
 app.get("/projects", (req, res) => res.json({ ok: true, projects: listProjects() }));
+
+// 🔥 NEW: /logs (200 dernières lignes)
+app.get("/logs", (req, res) => {
+  if (LOGS_TOKEN) {
+    const token = cleanStr(req.query?.token);
+    if (!token || token !== LOGS_TOKEN) {
+      return res.status(401).send("unauthorized (missing/invalid token)");
+    }
+  }
+  const out = tailFile(LOG_FILE, 220);
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.send(out || "no logs");
+});
 
 // ==================================================
 // SERVER + SOCKET
@@ -268,7 +315,6 @@ function extFromMime(mime, originalName) {
   if (mime === "application/pdf") return ".pdf";
   if (mime === "text/plain") return ".txt";
 
-  // audio: essaye d’être propre
   if (mime === "audio/webm") return ".webm";
   if (mime === "audio/ogg") return ".ogg";
   if (mime === "audio/mpeg") return ".mp3";
@@ -281,7 +327,7 @@ function extFromMime(mime, originalName) {
 }
 
 // ==================================================
-// UPLOAD (files + audio) + AUTO-TRANSCRIPT MESSAGE
+// UPLOAD
 // ==================================================
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPLOADS_DIR),
@@ -319,7 +365,6 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       size: req.file.size,
     };
 
-    // 1) message "pièce jointe" (comme avant)
     const msg = {
       id: Date.now(),
       ts: Date.now(),
@@ -341,77 +386,57 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
     io.to(project).emit("chatMessage", msg);
 
-    // 2) si audio => transcription => poste un message texte (même auteur) + déclenche Sensi dessus
     const ext = (path.extname(attachment.filename || "") || "").toLowerCase();
     const isAudio = isAudioLike(String(attachment.mimetype || ""), ext);
 
     if (isAudio && AUDIO_AUTO_TRANSCRIPT_MESSAGE) {
       const localPath = path.join(UPLOADS_DIR, attachment.storedAs);
 
-      // transcription en asynchrone (mais on reste dans la requête — pas de background “plus tard” côté user)
-      // => on renvoie OK upload tout de suite, puis on poste la transcription via socket dès prête.
       (async () => {
         try {
           const transcript = await transcribeAudioFile(localPath);
           const t = cleanStr(transcript);
-          if (!t) {
-            io.to(project).emit("systemMessage", {
+          if (t) {
+            const tMsg = {
               id: Date.now(),
               ts: Date.now(),
               project,
-              text: `🎙️ Audio reçu (${attachment.filename}) — transcription indisponible.`,
+              username,
+              userId,
+              message: `${AUDIO_TRANSCRIPT_PREFIX}${t}`,
+              meta: { kind: "audio_transcript", attachmentUrl: attachment.url, attachmentName: attachment.filename },
+            };
+
+            pushMessage(project, {
+              id: tMsg.id,
+              ts: tMsg.ts,
+              username: tMsg.username,
+              userId: tMsg.userId,
+              message: tMsg.message,
+              meta: tMsg.meta,
             });
-            // on lance quand même l'analyse fichier (qui dira "transcription vide")
-            analyzeFileWithSensi({ project, username, attachment }).catch((e) => console.error("[sensi-file]", e));
-            return;
+
+            io.to(project).emit("chatMessage", tMsg);
+
+            try { await sensiAnswer({ project, username, userText: t }); }
+            catch (e) { logLine("[sensi-audio-transcript]", e?.message || e, e?.stack); emitSensi(project, "⚠️ Erreur Sensi sur transcription."); }
+          } else {
+            emitSystem(project, `🎙️ Audio reçu (${attachment.filename}) — transcription indisponible.`);
           }
 
-          // poste la transcription comme message utilisateur (pratique pour "OVER" / workflows)
-          const tMsg = {
-            id: Date.now(),
-            ts: Date.now(),
-            project,
-            username,
-            userId,
-            message: `${AUDIO_TRANSCRIPT_PREFIX}${t}`,
-            meta: { kind: "audio_transcript", attachmentUrl: attachment.url, attachmentName: attachment.filename },
-          };
-
-          pushMessage(project, {
-            id: tMsg.id,
-            ts: tMsg.ts,
-            username: tMsg.username,
-            userId: tMsg.userId,
-            message: tMsg.message,
-            meta: tMsg.meta,
-          });
-
-          io.to(project).emit("chatMessage", tMsg);
-
-          // Sensi répond sur la transcription (comme si l’utilisateur avait écrit)
-          try {
-            await sensiAnswer({ project, username, userText: t });
-          } catch (e) {
-            console.error("[sensi-audio-transcript]", e);
-            emitSensi(project, "⚠️ Erreur Sensi lors de l’analyse de la transcription (voir logs).");
-          }
-
-          // analyse fichier Sensi (résumé + actions) en plus (optionnel)
-          analyzeFileWithSensi({ project, username, attachment }).catch((e) => console.error("[sensi-file]", e));
+          analyzeFileWithSensi({ project, username, attachment }).catch((e) => logLine("[sensi-file]", e?.message || e, e?.stack));
         } catch (e) {
-          console.error("[audio-transcript-flow]", e);
-          analyzeFileWithSensi({ project, username, attachment }).catch((er) => console.error("[sensi-file]", er));
+          logLine("[audio-transcript-flow]", e?.message || e, e?.stack);
+          analyzeFileWithSensi({ project, username, attachment }).catch((er) => logLine("[sensi-file]", er?.message || er, er?.stack));
         }
       })();
     } else {
-      // analyse fichier standard
-      analyzeFileWithSensi({ project, username, attachment }).catch((e) => console.error("[sensi-file]", e));
+      analyzeFileWithSensi({ project, username, attachment }).catch((e) => logLine("[sensi-file]", e?.message || e, e?.stack));
     }
 
-    // réponse HTTP immédiate (upload OK)
     res.json({ ok: true, project, attachment });
   } catch (e) {
-    console.error("[upload]", e);
+    logLine("[upload]", e?.message || e, e?.stack);
     res.status(500).json({ ok: false, error: "Upload error" });
   }
 });
@@ -445,8 +470,20 @@ function emitSystem(project, text) {
 }
 
 // ==================================================
-// DELETE author-only
+// DELETE author-only + DELETE ATTACHMENT FILE
 // ==================================================
+function safeUnlinkUpload(storedAs) {
+  const name = cleanStr(storedAs);
+  if (!name) return;
+  if (name.includes("..") || name.includes("/") || name.includes("\\")) return;
+  const full = path.join(UPLOADS_DIR, name);
+  try {
+    if (fs.existsSync(full)) fs.unlinkSync(full);
+  } catch (e) {
+    logLine("[unlink]", e?.message || e);
+  }
+}
+
 function deleteMessageIfAuthor(project, messageId, requesterUserId) {
   const p = safeProjectKey(project);
   if (!p) return { ok: false, reason: "bad_project" };
@@ -463,6 +500,10 @@ function deleteMessageIfAuthor(project, messageId, requesterUserId) {
 
   const msg = arr[idx];
   if (cleanStr(msg?.userId) !== reqId) return { ok: false, reason: "not_author" };
+
+  // ✅ si pièce jointe => on supprime aussi le fichier
+  const storedAs = cleanStr(msg?.attachment?.storedAs);
+  if (storedAs) safeUnlinkUpload(storedAs);
 
   arr.splice(idx, 1);
   scheduleHistorySave();
@@ -495,7 +536,7 @@ async function fetchWithTimeout(url, ms) {
       redirect: "follow",
       signal: controller.signal,
       headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; SensiBot/3.1)",
+        "User-Agent": "Mozilla/5.0 (compatible; SensiBot/3.3)",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       },
     });
@@ -659,7 +700,7 @@ async function extractTextFromFile(localFilePath, mimetype, originalName) {
       const out = await pdfParse(buf);
       return String(out?.text || "").slice(0, 18000);
     } catch (e) {
-      console.error("[pdf-parse]", e);
+      logLine("[pdf-parse]", e?.message || e);
       return "";
     }
   }
@@ -671,7 +712,7 @@ async function extractTextFromFile(localFilePath, mimetype, originalName) {
       const result = await mammoth.extractRawText({ path: localFilePath });
       return String(result?.value || "").slice(0, 18000);
     } catch (e) {
-      console.error("[mammoth]", e);
+      logLine("[mammoth]", e?.message || e);
       return "";
     }
   }
@@ -687,7 +728,7 @@ async function extractTextFromFile(localFilePath, mimetype, originalName) {
       const csv = XLSX.utils.sheet_to_csv(ws);
       return String(csv || "").slice(0, 18000);
     } catch (e) {
-      console.error("[xlsx-read]", e);
+      logLine("[xlsx-read]", e?.message || e);
       return "";
     }
   }
@@ -708,7 +749,7 @@ async function transcribeAudioFile(localFilePath) {
     const text = cleanStr(resp?.text || "");
     return text.slice(0, 18000);
   } catch (e) {
-    console.error("[transcribe]", e);
+    logLine("[transcribe]", e?.message || e, e?.stack);
     return "";
   }
 }
@@ -728,11 +769,8 @@ async function analyzeFileWithSensi({ project, username, attachment }) {
   const localPath = path.join(UPLOADS_DIR, attachment.storedAs);
 
   let extracted = "";
-  if (isAudio) {
-    extracted = await transcribeAudioFile(localPath);
-  } else if (!isImage) {
-    extracted = await extractTextFromFile(localPath, mimetype, attachment.filename);
-  }
+  if (isAudio) extracted = await transcribeAudioFile(localPath);
+  else if (!isImage) extracted = await extractTextFromFile(localPath, mimetype, attachment.filename);
 
   const system = `
 Tu es Sensi.
@@ -783,6 +821,30 @@ Réponds en français, concret.
 // ==================================================
 // SENSI: URL-ONLY WEB + MEMORY
 // ==================================================
+function stripActionBlock(text) {
+  const t = cleanStr(text);
+  const re = /```json\s*([\s\S]*?)\s*```/i;
+  const m = t.match(re);
+  if (!m) return { cleanText: t, plan: null };
+  const jsonRaw = m[1];
+  let plan = null;
+  try { plan = JSON.parse(jsonRaw); } catch { plan = null; }
+  const cleanText = t.replace(m[0], "").trim();
+  return { cleanText, plan };
+}
+
+async function buildWebBundle(userText) {
+  const urls = extractUrlsFromText(userText);
+  const pages = [];
+
+  for (const u of urls.slice(0, 4)) {
+    const page = await extractReadableTextFromUrl(u);
+    if (page.ok && page.text) pages.push(page);
+  }
+
+  return buildWebContext(pages);
+}
+
 async function maybeExtractAndStoreMemory({ project, username, userText }) {
   const t = cleanStr(userText);
   if (!t) return;
@@ -822,30 +884,6 @@ Format: {"facts":["...","..."]}
   if (added.length) emitSensi(project, `🧠 Mémoire globale mise à jour ✅\n- ${added.join("\n- ")}`);
 }
 
-function stripActionBlock(text) {
-  const t = cleanStr(text);
-  const re = /```json\s*([\s\S]*?)\s*```/i;
-  const m = t.match(re);
-  if (!m) return { cleanText: t, plan: null };
-  const jsonRaw = m[1];
-  let plan = null;
-  try { plan = JSON.parse(jsonRaw); } catch { plan = null; }
-  const cleanText = t.replace(m[0], "").trim();
-  return { cleanText, plan };
-}
-
-async function buildWebBundle(userText) {
-  const urls = extractUrlsFromText(userText);
-  const pages = [];
-
-  for (const u of urls.slice(0, 4)) {
-    const page = await extractReadableTextFromUrl(u);
-    if (page.ok && page.text) pages.push(page);
-  }
-
-  return buildWebContext(pages);
-}
-
 async function sensiAnswer({ project, username, userText }) {
   if (!hasOpenAI()) {
     emitSensi(project, "ℹ️ IA non configurée (OPENAI_API_KEY manquante).");
@@ -871,7 +909,7 @@ async function sensiAnswer({ project, username, userText }) {
       sources = built.sources || [];
     }
   } catch (e) {
-    console.error("[web-url-only]", e);
+    logLine("[web-url-only]", e?.message || e);
     webContext = "";
     sources = [];
   }
@@ -922,7 +960,7 @@ ${webContext ? `\nContexte WEB (extraits URL):\n${webContext}\n` : ""}
 
   if (final) emitSensi(project, final);
 
-  await maybeExtractAndStoreMemory({ project, username, userText }).catch(() => {});
+  await maybeExtractAndStoreMemory({ project, username, userText }).catch((e) => logLine("[memory]", e?.message || e));
 }
 
 // ==================================================
@@ -943,7 +981,7 @@ function broadcastProjects() {
 }
 
 io.on("connection", (socket) => {
-  console.log("Socket connected:", socket.id);
+  logLine("Socket connected:", socket.id);
   socket.data.userId = "";
   socket.data.username = "";
   socket.data.project = "";
@@ -1024,8 +1062,13 @@ io.on("connection", (socket) => {
     try {
       await sensiAnswer({ project: p, username: u, userText: m });
     } catch (e) {
-      console.error("[sensi-auto]", e);
-      emitSensi(p, "⚠️ Erreur Sensi (voir logs).");
+      const code = `sensi_${Date.now().toString(36)}`;
+      logLine("[sensi-auto]", code, { message: e?.message, name: e?.name, stack: e?.stack });
+      emitSensi(p,
+        `⚠️ Erreur Sensi (${code}).\n` +
+        `👉 Ouvre /health (AI=enabled?) puis /logs pour le détail.\n` +
+        `Causes fréquentes: OPENAI_API_KEY manquante/invalid, modèle invalide, quota.`
+      );
     }
   });
 
@@ -1052,18 +1095,18 @@ io.on("connection", (socket) => {
         emitPresence(proj);
       }
     }
-    console.log("Socket disconnected:", socket.id);
+    logLine("Socket disconnected:", socket.id);
   });
 });
 
 // ==================================================
 // PROCESS + START
 // ==================================================
-process.on("unhandledRejection", (err) => console.error("[unhandledRejection]", err));
-process.on("uncaughtException", (err) => console.error("[uncaughtException]", err));
+process.on("unhandledRejection", (err) => logLine("[unhandledRejection]", err?.message || err, err?.stack));
+process.on("uncaughtException", (err) => logLine("[uncaughtException]", err?.message || err, err?.stack));
 
 process.on("SIGTERM", () => {
-  console.warn("[SIGTERM] shutting down");
+  logLine("[SIGTERM] shutting down");
   try {
     saveProjectsNow();
     writeJSON(HISTORY_FILE, historyByProject);
@@ -1074,10 +1117,10 @@ process.on("SIGTERM", () => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, "0.0.0.0", () => {
-  console.log("🚀 Server running on", PORT);
-  console.log("Version:", APP_VERSION);
-  console.log("AI:", hasOpenAI() ? "enabled" : "disabled");
-  console.log("Models:", { chat: OPENAI_MODEL, transcribe: OPENAI_TRANSCRIBE_MODEL, image: OPENAI_IMAGE_MODEL });
-  console.log("Web:", "url-only (no search provider)");
-  console.log("Audio:", { autoTranscriptMessage: AUDIO_AUTO_TRANSCRIPT_MESSAGE, lang: AUDIO_TRANSCRIPT_LANGUAGE });
+  logLine("🚀 Server running on", PORT);
+  logLine("Version:", APP_VERSION);
+  logLine("AI:", hasOpenAI() ? "enabled" : "disabled");
+  logLine("Models:", { chat: OPENAI_MODEL, transcribe: OPENAI_TRANSCRIBE_MODEL, image: OPENAI_IMAGE_MODEL });
+  logLine("Web:", "url-only (no search provider)");
+  logLine("Audio:", { autoTranscriptMessage: AUDIO_AUTO_TRANSCRIPT_MESSAGE, lang: AUDIO_TRANSCRIPT_LANGUAGE });
 });

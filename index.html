@@ -1,10 +1,11 @@
-<!-- guibs:/index.html (COMPLET) — voice + FFT ready (client.js injecte la barre, mais on prépare un conteneur clean) -->
+<!-- guibs:/index.html (COMPLET) — ULTRA v3.3 aligned (voice + FFT ready) -->
 <!DOCTYPE html>
 <html lang="fr">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Sensi - travail collaboratif 🚀</title>
+  <title>Sensi-IA_travail_collaboratif</title>
+
   <style>
     body{ font-family: Arial, sans-serif; margin:20px; max-width:1100px; }
     h1{ margin-bottom: 10px; }
@@ -43,7 +44,7 @@
 
     .upload-state{ font-size:12px; color:#666; }
 
-    .panel{ border:1px solid #ccc; background:#fff; padding:10px; }
+    .panel{ border:1px solid #ccc; background:#fff; padding:10px; border-radius:10px; }
     .panel h3{ margin:0 0 8px 0; font-size:15px; }
     .badge{
       display:inline-block;
@@ -70,7 +71,10 @@
     .userline{ display:flex; align-items:center; gap:6px; min-width:0; }
     .uname{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:170px; display:inline-block; }
 
-    .danger{ border:1px solid #f2b8b5; background:#fff5f5; }
+    .danger{
+      border:1px solid #f2b8b5;
+      background:#fff5f5;
+    }
 
     /* ===== Menu ⋮ messages ===== */
     .msg-row{
@@ -110,8 +114,7 @@
     }
     .menu-item:hover{ background:#f3f4f6; }
 
-    /* ===== VOICE BAR (injectée par client.js) =====
-       On met juste une cohérence visuelle au cas où. */
+    /* ===== VOICE BAR (injectée par client.js) ===== */
     #voice-bar{
       margin-top:10px;
       padding:10px;
@@ -122,6 +125,7 @@
     #voice-bar button{
       border:1px solid #ddd;
       background:#fff;
+      border-radius:10px;
     }
     #voice-bar button:disabled{
       opacity:.55;
@@ -130,11 +134,28 @@
     #voice-bar canvas{
       display:block;
     }
+
+    /* (Optionnel) mini statut */
+    #statusbar{
+      margin:8px 0 12px;
+      padding:8px 10px;
+      border:1px dashed rgba(0,0,0,.18);
+      border-radius:10px;
+      background:#fff;
+      font-size:12px;
+      color:#444;
+    }
+    #statusbar code{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
   </style>
 </head>
 
 <body>
-  <h1>Sensi - travail collaboratif 🚀</h1>
+  <h1>Sensi-IA_travail_collaboratif 🚀</h1>
+
+  <!-- (Optionnel) zone debug: tu peux la laisser, elle ne casse rien -->
+  <div id="statusbar">
+    Statut: <span id="status-text">chargement…</span>
+  </div>
 
   <div class="topbar">
     <input type="text" id="username" placeholder="Pseudo" autocomplete="nickname" />
@@ -167,8 +188,8 @@
       </form>
 
       <!-- IMPORTANT:
-           La barre VOICE + le canvas FFT sont injectés par client.js juste après ce form.
-           (On ne met rien ici pour éviter les doublons.)
+        La barre VOICE + le canvas FFT sont injectés par client.js juste après ce form.
+        (On ne met rien ici pour éviter les doublons.)
       -->
     </div>
 
@@ -182,7 +203,22 @@
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <!-- ✅ pas besoin de ?v= si Cache-Control:no-store est bien mis côté server -->
   <script src="/client.js"></script>
+
+  <!-- Optionnel: affiche /health en bas (debug) -->
+  <script>
+    (async () => {
+      const el = document.getElementById("status-text");
+      try {
+        const res = await fetch("/health", { cache: "no-store" });
+        const data = await res.json();
+        const ai = data.ai || "unknown";
+        const ver = data.version || "?";
+        el.innerHTML = `OK ✅ | <code>${ver}</code> | AI: <code>${ai}</code>`;
+      } catch (e) {
+        el.textContent = "offline / health unreachable";
+      }
+    })();
+  </script>
 </body>
 </html>

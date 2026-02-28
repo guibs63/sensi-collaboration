@@ -1,0 +1,187 @@
+[1mdiff --git a/client.js b/client.js[m
+[1mindex e325442..5ff78ad 100644[m
+[1m--- a/client.js[m
+[1m+++ b/client.js[m
+[36m@@ -1,9 +1,13 @@[m
+[31m-// guibs:/client.js (COMPLET) — ULTRA v2 (Railway-safe + no-cache server-side)[m
+[32m+[m[32m// guibs:/client.js (COMPLET) — ULTRA v2 + VOICE "OVER" + FFT temps réel[m
+ //[m
+[31m-// ✅ Socket: websocket + polling fallback (prod safe)[m
+[31m-// ✅ /projects: {ok:true, projects:[...]} OU [...][m
+[31m-// ✅ Pas besoin de version bump (?v=) si tu mets Cache-Control:no-store sur /client.js côté server[m
+[31m-// ✅ Upload + delete message author-only + presence[m
+[32m+[m[32m// ✅ Reconnaissance vocale: ajoute au champ message[m
+[32m+[m[32m// ✅ Auto-envoi quand le mot-clé "over" est prononcé (mot seul ou fin de phrase)[m
+[32m+[m[32m// ✅ Affiche les fréquences (FFT) en temps réel pendant l’écoute + pendant l’enregistrement[m
+[32m+[m[32m// ✅ Upload audio (MediaRecorder) via /upload (même endpoint que tes fichiers)[m
+[32m+[m[32m//[m
+[32m+[m[32m// ⚠️ Prérequis backend (déjà OK si ton /upload accepte tout fichier) :[m
+[32m+[m[32m// - FormData: file + project + username + userId[m
+[32m+[m[32m// - Retour JSON: {ok:true, ...} + broadcast côté server (comme tes autres uploads)[m
+ [m
+ const socket = io(window.location.origin, {[m
+   transports: ["websocket", "polling"],[m
+[36m@@ -16,7 +20,29 @@[m [mconst socket = io(window.location.origin, {[m
+ /** =========================[m
+  *  FLAGS[m
+  *  ========================= */[m
+[31m-const AUTO_JOIN = false; // mets true si tu veux auto-join dès que pseudo + projet dispo[m
+[32m+[m[32mconst AUTO_JOIN = false;[m
+[32m+[m
+[32m+[m[32m// VOICE / AUDIO[m
+[32m+[m[32mconst ENABLE_VOICE = true;[m
+[32m+[m[32mconst VOICE_APPEND_TO_INPUT = true;[m
+[32m+[m
+[32m+[m[32m// 🔥 envoi auto quand "over" est prononcé[m
+[32m+[m[32mconst VOICE_SEND_ON_OVER = true;[m
+[32m+[m[32mconst VOICE_OVER_WORD = "over"; // mot-clé (insensible à la casse)[m
+[32m+[m
+[32m+[m[32m// FFT[m
+[32m+[m[32mconst SHOW_FFT = true;[m
+[32m+[m[32mconst FFT_FPS = 30;               // rafraîchissement du graphe[m
+[32m+[m[32mconst FFT_BINS = 64;              // nb de barres affichées (<= analyser.frequencyBinCount)[m
+[32m+[m[32mconst FFT_SMOOTHING = 0.8;        // 0..1[m
+[32m+[m[32mconst FFT_FFTSIZE = 2048;         // 512/1024/2048/4096...[m
+[32m+[m[32mconst FFT_MIN_DB = -90;[m
+[32m+[m[32mconst FFT_MAX_DB = -10;[m
+[32m+[m
+[32m+[m[32m// Upload audio[m
+[32m+[m[32mconst AUDIO_UPLOAD_ENDPOINT = "/upload";[m
+[32m+[m[32mconst AUDIO_MIME_PREFERRED = "audio/webm;codecs=opus";[m
+[32m+[m[32mconst AUDIO_MAX_SECONDS = 120;[m
+ [m
+ /** =========================[m
+  *  STATE[m
+[36m@@ -33,7 +59,6 @@[m [mconst messageNodes = new Map();[m
+ const LS_USER_ID = "sensi_user_id";[m
+ const LS_LAST_USERNAME = "sensi_last_username";[m
+ const LS_LAST_PROJECT = "sensi_last_project";[m
+[31m-[m
+ const myUserId = getOrCreateUserId();[m
+ [m
+ /** =========================[m
+[36m@@ -57,7 +82,18 @@[m [mconst usersList = document.getElementById("users");[m
+ const usersCount = document.getElementById("users-count");[m
+ const currentProjectLabel = document.getElementById("current-project-label");[m
+ [m
+[31m-// Sécurité si HTML change[m
+[32m+[m[32m// VOICE UI (créée dynamiquement)[m
+[32m+[m[32mlet voiceBar = null;[m
+[32m+[m[32mlet btnVoice = null;[m
+[32m+[m[32mlet btnRec = null;[m
+[32m+[m[32mlet btnSendRec = null;[m
+[32m+[m[32mlet voiceHint = null;[m
+[32m+[m[32mlet fftCanvas = null;[m
+[32m+[m[32mlet fftCtx = null;[m
+[32m+[m
+[32m+[m[32m/** =========================[m
+[32m+[m[32m *  DOM ASSERT[m
+[32m+[m[32m *  ========================= */[m
+ (function assertDom() {[m
+   const required = [[m
+     ["chat", chat],[m
+[36m@@ -127,9 +163,7 @@[m [mfunction restoreLastSession() {[m
+   try {[m
+     const u = cleanStr(localStorage.getItem(LS_LAST_USERNAME));[m
+     const p = cleanStr(localStorage.getItem(LS_LAST_PROJECT));[m
+[31m-[m
+     if (u && !cleanStr(usernameInput.value)) usernameInput.value = u;[m
+[31m-[m
+     return { u, p };[m
+   } catch {[m
+     return { u: "", p: "" };[m
+[36m@@ -141,6 +175,24 @@[m [mfunction setProjectLabel(p) {[m
+   currentProjectLabel.textContent = p || "—";[m
+ }[m
+ [m
+[32m+[m[32mfunction isSupportedMime(mime) {[m
+[32m+[m[32m  try {[m
+[32m+[m[32m    return !!(window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(mime));[m
+[32m+[m[32m  } catch { return false; }[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mfunction pickAudioMime() {[m
+[32m+[m[32m  if (isSupportedMime(AUDIO_MIME_PREFERRED)) return AUDIO_MIME_PREFERRED;[m
+[32m+[m[32m  const fallbacks = [[m
+[32m+[m[32m    "audio/webm",[m
+[32m+[m[32m    "audio/ogg;codecs=opus",[m
+[32m+[m[32m    "audio/ogg",[m
+[32m+[m[32m    "audio/mp4",[m
+[32m+[m[32m  ];[m
+[32m+[m[32m  for (const m of fallbacks) if (isSupportedMime(m)) return m;[m
+[32m+[m[32m  return ""; // laisser le navigateur choisir[m
+[32m+[m[32m}[m
+[32m+[m
+ /** =========================[m
+  *  UI[m
+  *  ========================= */[m
+[36m@@ -179,6 +231,7 @@[m [mfunction renderAttachment(att) {[m
+   const name = escapeHtml(att.filename || "fichier");[m
+   const url = escapeHtml(att.url);[m
+   const isImg = String(att.mimetype || "").startsWith("image/");[m
+[32m+[m[32m  const isAudio = String(att.mimetype || "").startsWith("audio/");[m
+ [m
+   if (isImg) {[m
+     return `[m
+[36m@@ -190,6 +243,17 @@[m [mfunction renderAttachment(att) {[m
+     `;[m
+   }[m
+ [m
+[32m+[m[32m  if (isAudio) {[m
+[32m+[m[32m    return `[m
+[32m+[m[32m      <div style="margin-top:6px;">[m
+[32m+[m[32m        <a href="${url}" target="_blank" rel="noopener">🎙️ ${name}</a>[m
+[32m+[m[32m        <div style="margin-top:6px;">[m
+[32m+[m[32m          <audio controls preload="none" src="${url}" style="width:260px;"></audio>[m
+[32m+[m[32m        </div>[m
+[32m+[m[32m      </div>[m
+[32m+[m[32m    `;[m
+[32m+[m[32m  }[m
+[32m+[m
+   return `<div style="margin-top:6px;"><a href="${url}" target="_blank" rel="noopener">📄 ${name}</a></div>`;[m
+ }[m
+ [m
+[36m@@ -371,7 +435,7 @@[m [masync function uploadFile(file) {[m
+   fd.append("username", username);[m
+   fd.append("userId", myUserId);[m
+ [m
+[31m-  const res = await fetch("/upload", { method: "POST", body: fd });[m
+[32m+[m[32m  const res = await fetch(AUDIO_UPLOAD_ENDPOINT, { method: "POST", body: fd });[m
+   const data = await res.json().catch(() => ({}));[m
+   if (!res.ok || !data.ok) throw new Error(data.error || `Upload failed (${res.status})`);[m
+   return data;[m
+[36m@@ -380,6 +444,25 @@[m [masync function uploadFile(file) {[m
+ /** =========================[m
+  *  SEND[m
+  *  ========================= */[m
+[32m+[m[32mfunction sendTextMessage(text) {[m
+[32m+[m[32m  if (!currentProject) return alert("Rejoins un projet d’abord 🙂");[m
+[32m+[m[32m  const username = cleanStr(usernameInput.value);[m
+[32m+[m[32m  if (!username) return alert("Entre un pseudo 🙂");[m
+[32m+[m
+[32m+[m[32m  const message = cleanStr(text);[m
+[32m+[m[32m  if (!message) return;[m
+[32m+[m
+[32m+[m[32m  currentUsername = username;[m
+[32m+[m[32m  saveLastSession();[m
+[32m+[m
+[32m+[m[32m  socket.emit("chatMessage", {[m
+[32m+[m[32m    username,[m
+[32m+[m[32m    userId: myUserId,[m
+[32m+[m[32m    message,[m
+[32m+[m[32m    project: currentProject,[m
+[32m+[m[32m  });[m
+[32m+[m[32m}[m
+[32m+[m
+ form.addEventListener("submit", async (e) => {[m
+   e.preventDefault();[m
+ [m
+[36m@@ -517,7 +600,7 @@[m [msocket.on("projectDeleted", ({ project }) => {[m
+ socket.on("projectError", (payload) => alert(payload?.message || "Erreur projet"));[m
+ [m
+ /** =========================[m
+[31m- *  CONNECT BOOTSTRAP[m
+[32m+[m[32m *  PROJECTS BOOTSTRAP[m
+  *  ========================= */[m
+ const last = restoreLastSession();[m
+ let 

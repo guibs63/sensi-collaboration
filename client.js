@@ -1,13 +1,15 @@
-// guibs:/client.js (COMPLET) — ULTRA v2 + VOICE "OVER" + FFT temps réel
+// guibs:/client.js (COMPLET) — ULTRA v3.3 CLIENT (compatible server ULTRA v3.3)
+// + VOICE "OVER" + FFT temps réel + Enregistrement + Upload /upload
 //
-// ✅ Reconnaissance vocale: ajoute au champ message
-// ✅ Auto-envoi quand le mot-clé "over" est prononcé (mot seul ou fin de phrase)
-// ✅ Affiche les fréquences (FFT) en temps réel pendant l’écoute + pendant l’enregistrement
-// ✅ Upload audio (MediaRecorder) via /upload (même endpoint que tes fichiers)
-//
-// ⚠️ Prérequis backend (déjà OK si ton /upload accepte tout fichier) :
-// - FormData: file + project + username + userId
-// - Retour JSON: {ok:true, ...} + broadcast côté server (comme tes autres uploads)
+// Backend attendu (OK sur ton server):
+// - GET  /projects -> { ok:true, projects:[...] }
+// - POST /upload   -> FormData(file, project, username, userId)
+// - socket:
+//   - "getProjects" -> "projectsUpdate" {projects:[...]}
+//   - "joinProject" {project,username,userId} -> "chatHistory" {project,messages:[...]}
+//   - "chatMessage" {project,username,userId,message} -> broadcast "chatMessage"
+//   - "deleteMessage" {project,messageId,userId} -> "messageDeleted" {project,messageId}
+//   - "presenceUpdate" {project,users:[...]}
 
 const socket = io(window.location.origin, {
   transports: ["websocket", "polling"],
@@ -28,14 +30,14 @@ const VOICE_APPEND_TO_INPUT = true;
 
 // 🔥 envoi auto quand "over" est prononcé
 const VOICE_SEND_ON_OVER = true;
-const VOICE_OVER_WORD = "over"; // mot-clé (insensible à la casse)
+const VOICE_OVER_WORD = "over";
 
 // FFT
 const SHOW_FFT = true;
-const FFT_FPS = 30;               // rafraîchissement du graphe
-const FFT_BINS = 64;              // nb de barres affichées (<= analyser.frequencyBinCount)
-const FFT_SMOOTHING = 0.8;        // 0..1
-const FFT_FFTSIZE = 2048;         // 512/1024/2048/4096...
+const FFT_FPS = 30;
+const FFT_BINS = 64;
+const FFT_SMOOTHING = 0.8;
+const FFT_FFTSIZE = 2048;
 const FFT_MIN_DB = -90;
 const FFT_MAX_DB = -10;
 
@@ -183,14 +185,9 @@ function isSupportedMime(mime) {
 
 function pickAudioMime() {
   if (isSupportedMime(AUDIO_MIME_PREFERRED)) return AUDIO_MIME_PREFERRED;
-  const fallbacks = [
-    "audio/webm",
-    "audio/ogg;codecs=opus",
-    "audio/ogg",
-    "audio/mp4",
-  ];
+  const fallbacks = ["audio/webm", "audio/ogg;codecs=opus", "audio/ogg", "audio/mp4"];
   for (const m of fallbacks) if (isSupportedMime(m)) return m;
-  return ""; // laisser le navigateur choisir
+  return "";
 }
 
 /** =========================
@@ -537,8 +534,9 @@ socket.on("chatHistory", (payload) => {
 });
 
 socket.on("chatMessage", (data) => {
+  if (!currentProject) return;
   const p = cleanStr(data?.project);
-  if (currentProject && p && p !== currentProject) return;
+  if (p && p !== currentProject) return;
 
   addMessage({
     id: data?.id,
@@ -551,16 +549,18 @@ socket.on("chatMessage", (data) => {
 });
 
 socket.on("messageDeleted", (payload) => {
+  if (!currentProject) return;
   const p = cleanStr(payload?.project);
   const mid = Number(payload?.messageId);
-  if (currentProject && p && p !== currentProject) return;
+  if (p && p !== currentProject) return;
   if (!Number.isFinite(mid)) return;
   removeMessageFromUI(mid);
 });
 
 socket.on("systemMessage", (msg) => {
+  if (!currentProject) return;
   const p = cleanStr(msg?.project);
-  if (currentProject && p && p !== currentProject) return;
+  if (p && p !== currentProject) return;
   addSystem(msg?.text || "Message système");
 });
 
@@ -613,6 +613,7 @@ async function loadProjectsOnce() {
     const res = await fetch("/projects");
     const data = await res.json().catch(() => ({}));
 
+    // ✅ server ULTRA v3.3: { ok:true, projects:[...] }
     const list =
       Array.isArray(data) ? data :
       Array.isArray(data?.projects) ? data.projects :
@@ -711,25 +712,18 @@ function ensureVoiceUI() {
   voiceBar.appendChild(voiceHint);
   if (SHOW_FFT) voiceBar.appendChild(fftCanvas);
 
-  // Place sous le formulaire
   form.parentNode.insertBefore(voiceBar, form.nextSibling);
 
   btnVoice.addEventListener("click", async () => {
     if (!ENABLE_VOICE) return;
-    if (isListening) {
-      stopListening();
-    } else {
-      await startListening();
-    }
+    if (isListening) stopListening();
+    else await startListening();
   });
 
   btnRec.addEventListener("click", async () => {
     if (!ENABLE_VOICE) return;
-    if (recorder && recorder.state === "recording") {
-      stopRecording();
-    } else {
-      await startRecording();
-    }
+    if (recorder && recorder.state === "recording") stopRecording();
+    else await startRecording();
   });
 
   btnSendRec.addEventListener("click", async () => {
@@ -786,7 +780,6 @@ async function ensureAnalyser() {
   analyser.maxDecibels = FFT_MAX_DB;
 
   src.connect(analyser);
-
   fftData = new Uint8Array(analyser.frequencyBinCount);
 }
 
@@ -819,21 +812,17 @@ function startFft() {
     const w = fftCanvas.width;
     const h = fftCanvas.height;
 
-    // background
     fftCtx.clearRect(0, 0, w, h);
 
     const bins = Math.min(FFT_BINS, fftData.length);
     const barW = w / bins;
 
     for (let i = 0; i < bins; i++) {
-      const v = fftData[i] / 255; // 0..1
+      const v = fftData[i] / 255;
       const barH = Math.max(1, v * h);
 
-      // couleur (simple) : gris -> bleu selon intensité (sans dépendre de style global)
-      // (si tu veux strict no-color, je peux retirer la teinte)
       const c = Math.floor(40 + v * 160);
       fftCtx.fillStyle = `rgb(${c}, ${c + 20}, ${Math.min(255, c + 80)})`;
-
       fftCtx.fillRect(i * barW, h - barH, Math.max(1, barW - 1), barH);
     }
   };
@@ -850,21 +839,18 @@ function normalizeTranscript(s) {
     .trim();
 }
 
-// Détecte "over" en fin (ou mot isolé) + renvoie {hasOver, cleanedText}
 function splitOnOver(transcript) {
   const norm = normalizeTranscript(transcript);
   const over = normalizeTranscript(VOICE_OVER_WORD);
 
   if (!norm) return { hasOver: false, cleanedText: "" };
 
-  // cas: "... over" (fin)
   if (norm === over) return { hasOver: true, cleanedText: "" };
   if (norm.endsWith(" " + over)) {
     const cleaned = norm.slice(0, -(over.length + 1)).trim();
     return { hasOver: true, cleanedText: cleaned };
   }
 
-  // cas: "... over ..." (mot au milieu) => on coupe au premier " over "
   const token = " " + over + " ";
   const idx = norm.indexOf(token);
   if (idx >= 0) {
@@ -883,7 +869,6 @@ async function startListening() {
     return;
   }
 
-  // micro + analyser
   try {
     await ensureMicStream();
     await ensureAnalyser();
@@ -897,7 +882,7 @@ async function startListening() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   recognition = recognition || new SR();
 
-  recognition.lang = "en-US"; // "over" est anglais → fiable. (Tu peux mettre "fr-FR" si tu veux)
+  recognition.lang = "en-US";
   recognition.interimResults = true;
   recognition.continuous = true;
   recognition.maxAlternatives = 1;
@@ -914,9 +899,7 @@ async function startListening() {
   };
 
   recognition.onend = () => {
-    // si l’utilisateur a cliqué stop, on laisse isListening=false
     if (isListening) {
-      // certains navigateurs arrêtent l’écoute tout seuls → on relance
       try { recognition.start(); } catch {}
     } else {
       stopFft();
@@ -937,23 +920,19 @@ async function startListening() {
     const display = cleanStr(final || interim);
     if (!display) return;
 
-    // UI hint (petit feedback)
     if (voiceHint) {
       voiceHint.textContent = `🗣️ ${display.slice(0, 80)}${display.length > 80 ? "…" : ""}`;
     }
 
-    // Si on a un FINAL, on traite le mot "over"
     if (cleanStr(final)) {
       const { hasOver, cleanedText } = splitOnOver(final);
 
       if (VOICE_APPEND_TO_INPUT && cleanedText) {
-        // ajoute au champ input (sans casser ce qui est déjà tapé)
         const cur = cleanStr(input.value);
         input.value = cur ? `${cur} ${cleanedText}` : cleanedText;
       }
 
       if (VOICE_SEND_ON_OVER && hasOver) {
-        // On envoie le contenu du champ (ou cleanedText si champ vide)
         const toSend = cleanStr(input.value) || cleanStr(cleanedText);
         if (toSend) {
           sendTextMessage(toSend);
@@ -961,8 +940,6 @@ async function startListening() {
           input.focus();
         }
       }
-    } else {
-      // interim => on peut juste afficher, sans toucher l'input pour éviter l'effet "spam"
     }
   };
 
@@ -982,9 +959,6 @@ function stopListening() {
   stopFft();
 }
 
-/** =========================
- *  RECORD + UPLOAD AUDIO
- *  ========================= */
 async function startRecording() {
   ensureVoiceUI();
 
@@ -1032,7 +1006,6 @@ async function startRecording() {
   btnRec.textContent = "⏹️ Stop rec";
   if (voiceHint) voiceHint.textContent = "🎙️ Enregistrement…";
 
-  // auto-stop sécurité
   clearTimeout(recStopTimer);
   recStopTimer = setTimeout(() => {
     if (recorder && recorder.state === "recording") stopRecording();
@@ -1048,14 +1021,57 @@ function stopRecording() {
 }
 
 /** =========================
- *  INIT VOICE UI (auto)
+ *  INIT VOICE UI
  *  ========================= */
 (function initVoice() {
   if (!ENABLE_VOICE) return;
-  // crée la barre dès le chargement, sans attendre join
   ensureVoiceUI();
   setVoiceButtonState();
 })();
+
+/** =========================
+ *  BOOTSTRAP PROJECTS
+ *  ========================= */
+const last = restoreLastSession();
+let projectsLoadedOnce = false;
+
+async function loadProjectsOnce() {
+  if (projectsLoadedOnce) return;
+  projectsLoadedOnce = true;
+
+  try {
+    const res = await fetch("/projects");
+    const data = await res.json().catch(() => ({}));
+
+    const list =
+      Array.isArray(data) ? data :
+      Array.isArray(data?.projects) ? data.projects :
+      [];
+
+    if (list.length > 0) {
+      setProjectsOptions(list, true);
+      const want = cleanStr(last?.p);
+      if (want && list.includes(want)) projectSelect.value = want;
+      return;
+    }
+  } catch (_) {}
+
+  socket.emit("getProjects");
+}
+
+socket.on("connect", async () => {
+  console.log("✅ Connecté Socket.io", socket.id);
+  await loadProjectsOnce();
+
+  if (AUTO_JOIN) {
+    const u = cleanStr(usernameInput.value);
+    const p = cleanStr(projectSelect.value);
+    if (u && p && !currentProject) joinProject();
+  }
+});
+
+socket.on("disconnect", () => addSystem("Déconnecté du serveur…"));
+socket.on("connect_error", (err) => addSystem(`Erreur connexion: ${err.message}`));
 
 /** =========================
  *  BONUS: stop mic tracks on unload
@@ -1063,8 +1079,6 @@ function stopRecording() {
 window.addEventListener("beforeunload", () => {
   try { stopListening(); } catch {}
   try { stopRecording(); } catch {}
-  try {
-    if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
-  } catch {}
+  try { if (mediaStream) mediaStream.getTracks().forEach(t => t.stop()); } catch {}
   try { if (audioCtx && audioCtx.state !== "closed") audioCtx.close(); } catch {}
 });
