@@ -1,12 +1,8 @@
-
-Sensi — package.json (STRICT VALID JSON — Railway FIX)
-Chemin: guibs:/package.json
-
 {
-  "name": "lietome",
+  "name": "sensi",
   "version": "1.0.0",
   "private": true,
-  "description": "Lietome Live multi-project chat",
+  "description": "Sensi Live multi-project chat",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
