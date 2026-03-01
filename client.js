@@ -104,6 +104,24 @@ socket.on("connect_error", (err) => setStatusBar(`socket: error (${err?.message 
 // utils
 function cleanStr(v) { return String(v ?? "").trim(); }
 
+function isReadyForVoice() {
+  // Voice should require a joined project + username to avoid "listening in the void"
+  return Boolean(cleanStr(currentProject) && cleanStr(currentUsername || usernameInput?.value));
+}
+
+function requireReadyForVoice() {
+  if (!cleanStr(usernameInput?.value)) {
+    alert("Entre un pseudo puis clique Rejoindre avant d'activer la voix 🙂");
+    return false;
+  }
+  if (!cleanStr(currentProject)) {
+    alert("Rejoins un projet avant d'activer la reconnaissance vocale 🙂");
+    return false;
+  }
+  return true;
+}
+
+
 function escapeHtml(str) {
   return String(str ?? "")
     .replaceAll("&", "&amp;")
@@ -268,10 +286,13 @@ function joinProject() {
   addSystem(`Connexion au projet "${currentProject}"...`);
 
   socket.emit("joinProject", { username: currentUsername, project: currentProject, userId: myUserId });
+
+  updateVoiceUiGate();
 }
 
 joinBtn.addEventListener("click", joinProject);
 usernameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") joinProject(); });
+usernameInput.addEventListener("input", () => updateVoiceUiGate());
 
 // create/delete project
 if (createProjectBtn && newProjectInput) {
@@ -459,7 +480,9 @@ socket.on("projectsUpdate", (payload) => {
   const list = Array.isArray(payload?.projects) ? payload.projects : [];
   setProjectsOptions(list, true);
 
-  const want = cleanStr(localStorage.getItem(LS_LAST_PROJECT));
+  
+  updateVoiceUiGate();
+const want = cleanStr(localStorage.getItem(LS_LAST_PROJECT));
   if (want && list.includes(want)) projectSelect.value = want;
 
   if (currentProject && !list.includes(currentProject)) {
@@ -522,10 +545,12 @@ socket.on("connect", async () => {
 let recognition = null;
 let isListening = false;
 let voiceMode = null; // "speech" | "chunk"
-let chunkRecorder = null;
-let chunkBlobs = []; // Firefox: accumulate chunks for valid container
-let chunkLastSentAt = 0;
-let chunkInFlight = false;
+let chunkRecorder = null; // legacy name (kept)
+let segRecorder = null; // Firefox rolling segments recorder
+let segChunks = [];
+let segTimer = null;
+let segInFlight = false;
+let segAccumulatedText = "";
 
 let chunkQueue = Promise.resolve();
 let chunkTextBuffer = "";
@@ -565,6 +590,15 @@ function pickAudioMime() {
   return "";
 }
 
+function updateVoiceUiGate() {
+  if (!btnVoice || !btnRec || !btnSendRec) return;
+  const ok = Boolean(cleanStr(currentProject) && cleanStr(usernameInput?.value));
+  btnVoice.disabled = !ok;
+  btnRec.disabled = !ok;
+  btnSendRec.disabled = !ok || !recBlob;
+  if (!ok && voiceHint) voiceHint.textContent = "🔒 Rejoins un projet pour activer la voix.";
+}
+
 function ensureVoiceUI() {
   if (voiceBar) return;
   voiceBar = document.createElement("div");
@@ -600,14 +634,17 @@ function ensureVoiceUI() {
 
   form.parentNode.insertBefore(voiceBar, form.nextSibling);
 
+  updateVoiceUiGate();
   btnVoice.addEventListener("click", async () => {
     if (!ENABLE_VOICE) return;
+    if (!requireReadyForVoice()) return;
     if (isListening) stopListening();
     else await startListening();
   });
 
   btnRec.addEventListener("click", async () => {
     if (!ENABLE_VOICE) return;
+    if (!requireReadyForVoice()) return;
     if (recorder && recorder.state === "recording") stopRecording();
     else await startRecording();
   });
@@ -762,6 +799,7 @@ function hasOverWord(transcript) {
 }
 
 async function startListening() {
+  if (!requireReadyForVoice()) return;
   ensureVoiceUI();
 
   // Always get mic + FFT (waves) first (works on Firefox too)
@@ -836,69 +874,122 @@ async function startListening() {
     return;
   }
 
-  // ✅ Firefox: pas de Web Speech API -> dictée via envoi d'extraits audio au serveur (/transcribe)
-  voiceMode = "chunk";
-  chunkTextBuffer = "";
-  chunkStartedAt = Date.now();
+  // ✅ Firefox: pas de Web Speech API -> dictée via segments valides (/transcribe)
+// Problème classique: les "chunks" MediaRecorder sont parfois illisibles => 400 "corrupted/unsupported".
+// Solution: on enregistre des segments *complets* (ex: 4s), on stop => Blob valide, on transcrit, puis on redémarre.
+voiceMode = "chunk";
+segAccumulatedText = "";
+chunkTextBuffer = "";
+chunkStartedAt = Date.now();
 
-  if (voiceHint) voiceHint.textContent = `🎧 Dictée Firefox : parle, et dis "over" / "ouvre" / "terminé" pour envoyer.`;
+if (voiceHint) voiceHint.textContent = `🎧 Dictée Firefox : parle, et dis "over" / "ouvre" / "terminé" pour envoyer.`;
 
-  // start recorder in small chunks (2.5s) for near real-time transcription
+const SEG_MS = 4000;
+
+const startOneSegment = () => {
+  if (!isListening) return;
   try {
-    chunkRecorder = new MediaRecorder(mediaStream, { mimeType: getBestMimeType() });
+    segChunks = [];
+    const prefer = pickAudioMime();
+
+    try {
+      segRecorder = new MediaRecorder(mediaStream, prefer ? { mimeType: prefer } : undefined);
+    } catch {
+      segRecorder = new MediaRecorder(mediaStream);
+    }
+
+    segRecorder.ondataavailable = (ev) => {
+      if (ev.data && ev.data.size > 0) segChunks.push(ev.data);
+    };
+
+    segRecorder.onstop = () => {
+      if (!isListening) return;
+      const blob = new Blob(segChunks, { type: segRecorder?.mimeType || (segChunks[0]?.type || "audio/webm") });
+      segChunks = [];
+
+      chunkQueue = chunkQueue.then(async () => {
+        if (segInFlight) return;
+        segInFlight = true;
+        try {
+          if (!blob || blob.size < 10 * 1024) return;
+
+          const text = await transcribeAudioBlob(blob);
+          if (!text) return;
+
+          segAccumulatedText = cleanStr((segAccumulatedText + " " + text).slice(-2500));
+          chunkTextBuffer = segAccumulatedText;
+
+          if (voiceHint) {
+            const preview = cleanStr(chunkTextBuffer).slice(0, 90);
+            voiceHint.textContent = `🗣️ ${preview}${chunkTextBuffer.length > 90 ? "…" : ""}`;
+          }
+
+          if (VOICE_APPEND_TO_INPUT) {
+            const cleaned = stripVoiceTrigger(chunkTextBuffer);
+            if (cleaned) input.value = cleaned;
+          }
+
+          if (VOICE_SEND_ON_OVER && hasVoiceTrigger(chunkTextBuffer)) {
+            const msg = cleanStr(stripVoiceTrigger(chunkTextBuffer));
+            if (msg) sendTextMessage(msg);
+            input.value = "";
+            input.focus();
+            segAccumulatedText = "";
+            chunkTextBuffer = "";
+            stopListening();
+            return;
+          }
+        } catch (err) {
+          console.warn("transcribe segment failed", err);
+        } finally {
+          segInFlight = false;
+        }
+      }).finally(() => {
+        if (isListening) startOneSegment();
+      });
+    };
+
+    segRecorder.start(); // no timeslice => finalized container on stop
+    clearTimeout(segTimer);
+    segTimer = setTimeout(() => {
+      try { if (segRecorder && segRecorder.state === "recording") segRecorder.stop(); } catch {}
+    }, SEG_MS);
   } catch (e) {
-    // fallback without explicit mimeType
-    chunkRecorder = new MediaRecorder(mediaStream);
+    console.error(e);
+    if (voiceHint) voiceHint.textContent = "⚠️ Dictée Firefox: enregistrement impossible.";
   }
+};
 
-  chunkRecorder.ondataavailable = (ev) => {
-    const blob = ev.data;
-    if (!blob || blob.size < 1200) return;
+isListening = true;
+setVoiceButtonState();
+startOneSegment();
+return;
 
-    // 🔒 IMPORTANT (Firefox): single chunks may be undecodable/corrupted for transcription.
-    // We accumulate chunks and send the *combined* Blob so the container header stays valid.
-    chunkBlobs.push(blob);
 
-    // throttle server calls (avoid spam)
-    const now = Date.now();
-    if (chunkInFlight) return;
-    if (now - chunkLastSentAt < 2500) return;
-    chunkLastSentAt = now;
-
-    const combinedBlob = new Blob(chunkBlobs, { type: blob.type || "audio/ogg" });
-
-    chunkInFlight = true;
-    chunkQueue = chunkQueue.then(async () => {
-      try {
-        const text = await transcribeAudioBlob(combinedBlob);
-        if (!text) return;
-
-        // overwrite buffer (combined audio would otherwise duplicate)
-        chunkTextBuffer = cleanStr(text);
+        chunkTextBuffer = cleanStr(chunkTextBuffer + " " + text);
 
         if (voiceHint) {
           const preview = cleanStr(chunkTextBuffer).slice(0, 80);
           voiceHint.textContent = `🗣️ ${preview}${chunkTextBuffer.length > 80 ? "…" : ""}`;
         }
 
+        // write live into input
         if (VOICE_APPEND_TO_INPUT) {
           const cleaned = stripVoiceTrigger(chunkTextBuffer);
           if (cleaned) input.value = cleaned;
         }
 
-        if (VOICE_SEND_ON_OVER && hasVoiceTrigger(chunkTextBuffer)) {
+        // trigger send
+        if (VOICE_SEND_ON_OVER && hasVoiceTrigger(text)) {
           const msg = cleanStr(stripVoiceTrigger(chunkTextBuffer));
           if (msg) sendTextMessage(msg);
           input.value = "";
           input.focus();
           chunkTextBuffer = "";
-          chunkBlobs = [];
           stopListening();
         }
       } catch (err) {
         console.warn("transcribe chunk failed", err);
-      } finally {
-        chunkInFlight = false;
       }
     });
   };
@@ -910,7 +1001,7 @@ async function startListening() {
   isListening = true;
   setVoiceButtonState();
   // collect chunks every 2500ms
-  try { chunkRecorder.start(1500); } catch { chunkRecorder.start(); }
+  try { chunkRecorder.start(2500); } catch { chunkRecorder.start(); }
 }
 
 function stopListening() {
@@ -920,13 +1011,15 @@ function stopListening() {
 
   try { recognition && recognition.stop(); } catch {}
 
-  // Firefox chunk mode
-  try {
-    if (chunkRecorder && chunkRecorder.state === "recording") chunkRecorder.stop();
-  } catch {}
+  // Firefox segment mode
+  try { if (segTimer) clearTimeout(segTimer); } catch {}
+  segTimer = null;
+  try { if (segRecorder && segRecorder.state === "recording") segRecorder.stop(); } catch {}
+  segRecorder = null;
+  segChunks = [];
+  segInFlight = false;
+  segAccumulatedText = "";
   chunkRecorder = null;
-  chunkBlobs = [];
-  chunkInFlight = false;
   voiceMode = null;
 
   stopFft();
@@ -934,6 +1027,7 @@ function stopListening() {
 
 // Recording
 async function startRecording() {
+  if (!requireReadyForVoice()) return;
   ensureVoiceUI();
 
   if (!currentProject) return alert("Rejoins un projet d’abord 🙂");

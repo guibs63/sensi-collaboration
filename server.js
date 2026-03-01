@@ -1,7 +1,5 @@
 
 
-
-
 // 
 "use strict";
 
@@ -320,20 +318,6 @@ function extFromMime(mime, originalName) {
   return "";
 }
 
-
-function sniffAudioFormat(buffer) {
-  try {
-    if (!buffer || buffer.length < 12) return { ext: "webm", mime: "audio/webm" };
-    if (buffer.slice(0, 4).toString("ascii") === "OggS") return { ext: "ogg", mime: "audio/ogg" };
-    if (buffer[0] === 0x1A && buffer[1] === 0x45 && buffer[2] === 0xDF && buffer[3] === 0xA3) return { ext: "webm", mime: "audio/webm" };
-    if (buffer.slice(0, 4).toString("ascii") === "RIFF" && buffer.slice(8, 12).toString("ascii") === "WAVE") return { ext: "wav", mime: "audio/wav" };
-    if (buffer.slice(4, 8).toString("ascii") === "ftyp") return { ext: "m4a", mime: "audio/mp4" };
-    return { ext: "webm", mime: "audio/webm" };
-  } catch {
-    return { ext: "webm", mime: "audio/webm" };
-  }
-}
-
 // ==================================================
 // UPLOAD
 // ==================================================
@@ -363,31 +347,25 @@ const memUpload = multer({
 
 app.post("/transcribe", memUpload.single("audio"), async (req, res) => {
   let tmpPath = null;
+  try { logLine(\"[transcribe]\", { size: req.file?.size, mimetype: req.file?.mimetype, originalname: req.file?.originalname }); } catch {}
   try {
     if (!OPENAI_API_KEY) return res.status(500).json({ ok: false, error: "OPENAI_API_KEY manquante." });
-    if (!req.file || !req.file.buffer) return res.status(400).json({ ok: false, error: "Aucun audio." });
+    if (!req.file) return res.status(400).json({ ok: false, error: "Aucun audio." });
 
-    if (req.file.size < 8 * 1024) {
-      return res.status(400).json({ ok: false, error: "Audio trop court (chunk invalide). Parle un peu plus longtemps puis réessaie." });
-    }
-
-    const sniff = sniffAudioFormat(req.file.buffer);
+    // Save to /tmp to give the SDK a filename/extension (some formats need it)
     const mime = (req.file.mimetype || "").toLowerCase();
+    let ext = "webm";
+    if (mime.includes("wav")) ext = "wav";
+    else if (mime.includes("mpeg") || mime.includes("mp3")) ext = "mp3";
+    else if (mime.includes("mp4") || mime.includes("m4a")) ext = "m4a";
+    else if (mime.includes("ogg")) ext = "ogg";
 
-// ✅ FIX: éviter le ternaire imbriqué (source du SyntaxError en prod)
-// On détermine une extension stable via une logique simple et lisible.
-let ext = sniff.ext || "webm";
-if (mime.includes("wav")) ext = "wav";
-else if (mime.includes("mpeg") || mime.includes("mp3")) ext = "mp3";
-else if (mime.includes("mp4") || mime.includes("m4a")) ext = "m4a";
-else if (mime.includes("ogg")) ext = "ogg";
-else if (mime.includes("webm")) ext = "webm";
     tmpPath = path.join("/tmp", `sensi_voice_${Date.now()}_${crypto.randomBytes(4).toString("hex")}.${ext}`);
     await fs.promises.writeFile(tmpPath, req.file.buffer);
 
     const openai = getOpenAIClient();
-    const model = process.env.OPENAI_TRANSCRIBE_MODEL || process.env.TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe";
 
+    const model = process.env.TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe";
     const result = await openai.audio.transcriptions.create({
       file: fs.createReadStream(tmpPath),
       model,
@@ -398,13 +376,11 @@ else if (mime.includes("webm")) ext = "webm";
     return res.json({ ok: true, text: cleanStr(text) });
   } catch (e) {
     console.error("TRANSCRIBE_ERROR:", e);
-    const msg = e?.message || String(e);
-    if (/corrupted|unsupported|invalid_value/i.test(msg)) {
-      return res.status(400).json({ ok: false, error: "Audio non supporté/illisible. Essaie Chrome/Edge ou enregistre plus longtemps." });
-    }
-    return res.status(500).json({ ok: false, error: msg });
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
   } finally {
-    if (tmpPath) fs.promises.unlink(tmpPath).catch(() => {});
+    if (tmpPath) {
+      fs.promises.unlink(tmpPath).catch(() => {});
+    }
   }
 });
 

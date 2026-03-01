@@ -1,4 +1,8 @@
 
+
+
+
+
 <!-- guibs:/index.html (COMPLET) — ULTRA v3.4.3 aligned (voice + FFT + projects compat) -->
 <!DOCTYPE html>
 <html lang="fr">
@@ -87,20 +91,12 @@
   <script src="/client.js"></script>
 
   <script>
-    // Health check robuste : affiche "ok/time" + champs optionnels version/ai/web si présents
     (async () => {
       const el = document.getElementById("status-text");
       try {
         const res = await fetch("/health", { cache: "no-store" });
         const data = await res.json();
-
-        const ok = (data && (data.ok === true || data.ok === "true")) ? "OK ✅" : "WARN ⚠️";
-        const time = data?.time ? new Date(data.time).toLocaleString("fr-FR") : "";
-        const version = data?.version ? ` | <code>${data.version}</code>` : "";
-        const ai = (data?.ai !== undefined) ? ` | AI: <code>${data.ai}</code>` : "";
-        const web = (data?.web !== undefined && data?.web !== "") ? ` | Web: <code>${data.web}</code>` : "";
-
-        el.innerHTML = `${ok}${time ? " | " + time : ""}${version}${ai}${web}`;
+        el.innerHTML = `OK ✅ | <code>${data.version || "?"}</code> | AI: <code>${data.ai || "?"}</code> | Web: <code>${data.web || ""}</code>`;
       } catch {
         el.textContent = "offline / health unreachable";
       }
