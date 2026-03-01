@@ -1,0 +1,119 @@
+require("dotenv").config();
+
+const express = require("express");
+const http = require("http");
+const cors = require("cors");
+const path = require("path");
+const { Server } = require("socket.io");
+const { Pool } = require("pg");
+const { v4: uuidv4 } = require("uuid");
+const multer = require("multer");
+const mime = require("mime-types");
+const fileType = require("file-type");
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+app.use(express.static(__dirname));
+
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: { origin: "*" }
+});
+
+// =======================
+// DB
+// =======================
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
+// =======================
+// Upload
+// =======================
+
+const storage = multer.memoryStorage();
+const upload = multer({ storage });
+
+// =======================
+// ROUTES
+// =======================
+
+app.get("/health", (req, res) => {
+  res.json({ ok: true, time: new Date() });
+});
+
+app.get("/projects", async (req, res) => {
+  const result = await pool.query("SELECT name FROM projects");
+  res.json(result.rows);
+});
+
+app.post("/upload", upload.single("file"), async (req, res) => {
+  try {
+    const buffer = req.file.buffer;
+    const sniff = await fileType.fromBuffer(buffer);
+
+    const mimeType = sniff?.mime || req.file.mimetype;
+
+    const ext =
+      sniff?.ext ||
+      (mimeType.includes("webm")
+        ? "webm"
+        : mime.extension(mimeType));
+
+    // ✅ ICI était l'erreur de parenthèse dans ta version précédente
+
+    const filename = uuidv4() + "." + ext;
+
+    res.json({ filename });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Upload failed" });
+  }
+});
+
+// =======================
+// SOCKET
+// =======================
+
+let users = {};
+
+io.on("connection", socket => {
+
+  socket.on("joinProject", project => {
+    socket.join(project);
+    users[socket.id] = project;
+
+    const roomUsers = Object.keys(users)
+      .filter(id => users[id] === project)
+      .map(id => id);
+
+    io.to(project).emit("updateUsers", roomUsers);
+  });
+
+  socket.on("chatMessage", data => {
+    io.to(data.project).emit("message", data);
+  });
+
+  socket.on("disconnect", () => {
+    const project = users[socket.id];
+    delete users[socket.id];
+
+    if (project) {
+      const roomUsers = Object.keys(users)
+        .filter(id => users[id] === project)
+        .map(id => id);
+
+      io.to(project).emit("updateUsers", roomUsers);
+    }
+  });
+
+});
+
+const PORT = process.env.PORT || 8080;
+server.listen(PORT, () => {
+  console.log("🚀 Server running on port", PORT);
+});

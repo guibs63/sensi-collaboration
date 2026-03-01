@@ -2,7 +2,6 @@
 
 
 
-
 // 
 "use strict";
 
@@ -374,13 +373,15 @@ app.post("/transcribe", memUpload.single("audio"), async (req, res) => {
 
     const sniff = sniffAudioFormat(req.file.buffer);
     const mime = (req.file.mimetype || "").toLowerCase();
-    const ext =
-      (mime.includes("wav") ? "wav" :
-      (mime.includes("mpeg") || mime.includes("mp3") ? "mp3" :
-      (mime.includes("mp4") || mime.includes("m4a") ? "m4a" :
-      (mime.includes("ogg") ? "ogg" :
-      (mime.includes("webm") ? "webm" : sniff.ext))));
 
+// ✅ FIX: éviter le ternaire imbriqué (source du SyntaxError en prod)
+// On détermine une extension stable via une logique simple et lisible.
+let ext = sniff.ext || "webm";
+if (mime.includes("wav")) ext = "wav";
+else if (mime.includes("mpeg") || mime.includes("mp3")) ext = "mp3";
+else if (mime.includes("mp4") || mime.includes("m4a")) ext = "m4a";
+else if (mime.includes("ogg")) ext = "ogg";
+else if (mime.includes("webm")) ext = "webm";
     tmpPath = path.join("/tmp", `sensi_voice_${Date.now()}_${crypto.randomBytes(4).toString("hex")}.${ext}`);
     await fs.promises.writeFile(tmpPath, req.file.buffer);
 
