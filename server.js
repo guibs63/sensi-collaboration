@@ -353,7 +353,6 @@ app.post("/transcribe", memUpload.single("audio"), async (req, res) => {
   try {
     if (!OPENAI_API_KEY) return res.status(500).json({ ok: false, error: "OPENAI_API_KEY manquante." });
     if (!req.file) return res.status(400).json({ ok: false, error: "Aucun audio." });
-    if (req.file.size && req.file.size < 1200) return res.status(400).json({ ok:false, error:"Audio trop court (silence?)" });
 
     // Save to /tmp to give the SDK a filename/extension (some formats need it)
     const mime = (req.file.mimetype || "").toLowerCase();
