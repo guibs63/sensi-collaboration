@@ -1,4 +1,3 @@
-guibs:/client.js — ULTRA v3.4.3 (COMPLET) corrigé
 
 // FIXES ✅
 // 1) Edge/Chrome: la dictée écrit toujours dans #message (mode "speech"), et "over/ouvre/terminé" envoie le texte.
@@ -276,18 +275,36 @@ usernameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") joinPr
 
 // create/delete project
 if (createProjectBtn && newProjectInput) {
-  createProjectBtn.addEventListener("click", () => {
+  const doCreateProject = () => {
     const name = cleanStr(newProjectInput.value);
     if (!name) return;
-    socket.emit("createProject", { name });
-    newProjectInput.value = "";
-  });
+
+    // ✅ Use Socket.IO ACK to get immediate success/error feedback
+    socket.emit("createProject", { name }, (resp) => {
+      if (!resp || resp.ok !== true) {
+        alert(resp?.message || "Erreur création projet");
+        return;
+      }
+
+      // resp: { ok:true, project, projects }
+      const list = Array.isArray(resp.projects) ? resp.projects : [];
+      if (list.length) setProjectsOptions(list, true);
+
+      if (resp.project) {
+        projectSelect.value = resp.project;
+        try { localStorage.setItem(LS_LAST_PROJECT, resp.project); } catch {}
+      }
+
+      newProjectInput.value = "";
+      addSystem(`✅ Projet créé: "${resp.project}". Clique Rejoindre.`);
+    });
+  };
+
+  createProjectBtn.addEventListener("click", doCreateProject);
   newProjectInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
-      const name = cleanStr(newProjectInput.value);
-      if (!name) return;
-      socket.emit("createProject", { name });
-      newProjectInput.value = "";
+      e.preventDefault();
+      doCreateProject();
     }
   });
 }

@@ -2,6 +2,7 @@
 
 
 
+
 // 
 "use strict";
 
@@ -182,7 +183,8 @@ function safeProjectKey(project) {
   return p ? p.slice(0, 80) : "";
 }
 function isValidProjectName(name) {
-  return /^[a-zA-Z0-9 _.\-]{2,50}$/.test(name);
+  // ✅ Unicode letters (accents) + numbers + space + _ . -
+  return /^[\p{L}\p{N} _.\-]{2,50}$/u.test(name);
 }
 function hasOpenAI() { return Boolean(cleanEnv(OPENAI_API_KEY)); }
 function getOpenAIClient() { return new OpenAI({ apiKey: OPENAI_API_KEY }); }
