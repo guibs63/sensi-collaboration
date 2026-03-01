@@ -79,9 +79,9 @@ app.use(express.static(__dirname));
 // ==================================================
 function cleanEnv(v) { return String(v ?? "").trim(); }
 
-const APP_VERSION = process.env.APP_VERSION || "ultra-v3.4.3";
+const APP_VERSION = process.env.APP_VERSION || "ultra-v3.4.4-persist";
 
-// ✅ Persistent storage root (Railway/Render): set DATA_DIR or mount a volume and set RAILWAY_VOLUME_MOUNT_PATH
+// ✅ Persistent storage root (Railway/Render): set DATA_DIR to a mounted/persistent path
 const STORAGE_ROOT = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || __dirname;
 const STORAGE_DIR = path.join(STORAGE_ROOT, "storage");
 const HISTORY_FILE = path.join(STORAGE_DIR, "messages.json");
@@ -170,6 +170,9 @@ function tailFile(filePath, maxLines = 200) {
   }
 }
 
+// ==================================================
+// HELPERS
+// ==================================================
 
 function writeJSONAtomic(file, data) {
   try {
@@ -178,20 +181,15 @@ function writeJSONAtomic(file, data) {
     fs.renameSync(tmp, file);
   } catch (e) {
     logLine("[storage] atomic write failed:", file, e?.message || e);
-    // fallback
     try { fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8"); } catch {}
   }
 }
 
-// ==================================================
-// HELPERS
-// ==================================================
 function readJSON(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; }
 }
 function writeJSON(file, data) {
-  try { fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8"); }
-  catch (e) { logLine("[storage] write failed:", file, e?.message || e); }
+  writeJSONAtomic(file, data);
 }
 function cleanStr(v) { return String(v ?? "").trim(); }
 function safeProjectKey(project) {
@@ -283,6 +281,19 @@ app.get("/health", (req, res) => {
     audio: { autoTranscriptMessage: AUDIO_AUTO_TRANSCRIPT_MESSAGE, language: AUDIO_TRANSCRIPT_LANGUAGE },
     logs: { enabled: true, protectedByToken: Boolean(LOGS_TOKEN) },
   });
+
+
+app.get("/debug/storage", (req, res) => {
+  res.json({
+    ok: true,
+    STORAGE_ROOT,
+    STORAGE_DIR,
+    hasProjectsFile: fs.existsSync(PROJECTS_FILE),
+    hasHistoryFile: fs.existsSync(HISTORY_FILE),
+    projectsCount: Array.isArray(projects) ? projects.length : 0,
+    historyProjects: historyByProject ? Object.keys(historyByProject).length : 0,
+  });
+});
 });
 
 // ✅ compat: certains clients attendent un tableau JSON direct
