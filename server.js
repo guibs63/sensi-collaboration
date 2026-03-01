@@ -3,6 +3,7 @@
 
 
 
+
 // 
 "use strict";
 
@@ -501,13 +502,31 @@ io.on("connection", (socket) => {
     if (typeof ack === "function") ack(ok);
   };
 
-  socket.on("createProject", handleCreateProject);
-  socket.on("create project", handleCreateProject);
+  
+  socket.on("createProject", (payload, ack) => {
+    const name = cleanStr(payload?.name);
+    if (!name || !isValidProjectName(name)) {
+      const err = { ok:false, message:"Nom invalide" };
+      if (ack) ack(err);
+      return;
+    }
 
-  socket.on("deleteProject", ({ project }) => {
-    const p = safeProjectKey(project);
-    if (!p) return;
-    if (!projects.includes(p)) return socket.emit("projectError", { message: "Projet introuvable." });
+    if (projects.includes(name)) {
+      const err = { ok:false, message:"Projet déjà existant" };
+      if (ack) ack(err);
+      return;
+    }
+
+    projects.push(name);
+    projects = Array.from(new Set(projects));
+    saveProjectsNow && saveProjectsNow();
+
+    const resp = { ok:true, project:name, projects };
+    if (ack) ack(resp);
+
+    io.emit("projectsUpdate", { projects });
+  });
+
     if (projects.length <= 1) return socket.emit("projectError", { message: "Impossible de supprimer le dernier projet." });
 
     io.to(p).emit("projectDeleted", { project: p });

@@ -280,7 +280,26 @@ if (createProjectBtn && newProjectInput) {
   createProjectBtn.addEventListener("click", () => {
     const name = cleanStr(newProjectInput.value);
     if (!name) return;
-    socket.emit("createProject", { name });
+    
+    socket.emit("createProject", { name }, (resp) => {
+      if (!resp || resp.ok !== true) {
+        alert(resp?.message || "Erreur création projet");
+        return;
+      }
+
+      const list = Array.isArray(resp.projects) ? resp.projects : [];
+      projectSelect.innerHTML = "";
+      list.forEach(p => {
+        const opt = document.createElement("option");
+        opt.value = p;
+        opt.textContent = p;
+        projectSelect.appendChild(opt);
+      });
+
+      projectSelect.value = resp.project;
+      newProjectInput.value = "";
+    });
+
     newProjectInput.value = "";
   });
   newProjectInput.addEventListener("keydown", (e) => {
