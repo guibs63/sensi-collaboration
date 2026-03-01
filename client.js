@@ -1,5 +1,8 @@
 
 
+
+
+guibs:/client.js — ULTRA v3.4.3
 // guibs:/client.js (COMPLET) — ULTRA v3.4.3 CLIENT (Fix "over" send + Firefox audio UX) ✅
 "use strict";
 
@@ -20,6 +23,9 @@ const VOICE_APPEND_TO_INPUT = true;
 const VOICE_SEND_ON_OVER = true;
 const VOICE_OVER_WORD = "over";
 
+
+// Firefox/fr-FR peut transcrire "over" en "ouvre" / "terminé"
+const VOICE_TRIGGERS = ["over", "ouvre", "terminé", "termine", "terminée", "terminee"];
 // Firefox: éviter blocage autoplay / permissions
 const FIREFOX_FORCE_USER_GESTURE_BEFORE_AUDIOCTX = true;
 
@@ -466,7 +472,6 @@ socket.on("connect", async () => {
 // =========================
 let recognition = null;
 let isListening = false;
-let voiceBuffer = ""; // accumule les segments finaux (anti-dup + envoi fiable)
 
 let mediaStream = null;
 let audioCtx = null;
@@ -666,41 +671,37 @@ function normalizeTranscript(s) {
     .trim();
 }
 
+// Returns { hasOver, withoutOver, trigger }
 function hasOverWord(transcript) {
   const norm = normalizeTranscript(transcript);
-  const over = normalizeTranscript(VOICE_OVER_WORD);
-  if (!norm) return { hasOver: false, withoutOver: transcript };
+  if (!norm) return { hasOver: false, withoutOver: transcript, trigger: "" };
 
-  // accept: "... over", "over", "... over." etc
-  if (norm === over) return { hasOver: true, withoutOver: "" };
-  if (norm.endsWith(" " + over)) return { hasOver: true, withoutOver: norm.slice(0, -(over.length + 1)).trim() };
+  // Try each trigger (over / ouvre / terminé …)
+  for (const t of VOICE_TRIGGERS) {
+    const trig = normalizeTranscript(t);
+    if (!trig) continue;
 
-  // contains token
-  const token = " " + over + " ";
-  const idx = (" " + norm + " ").indexOf(token);
-  if (idx >= 0) {
-    const cleaned = (" " + norm + " ").slice(0, idx).trim();
-    return { hasOver: true, withoutOver: cleaned };
+    // exact
+    if (norm === trig) return { hasOver: true, withoutOver: "", trigger: trig };
+
+    // at end
+    if (norm.endsWith(" " + trig)) {
+      const without = norm.slice(0, -(trig.length + 1)).trim();
+      return { hasOver: true, withoutOver: without, trigger: trig };
+    }
+
+    // token somewhere (rare but ok)
+    const token = " " + trig + " ";
+    const idx = (" " + norm + " ").indexOf(token);
+    if (idx >= 0) {
+      const cleaned = (" " + norm + " ").slice(0, idx).trim();
+      return { hasOver: true, withoutOver: cleaned, trigger: trig };
+    }
   }
-  return { hasOver: false, withoutOver: transcript };
+
+  return { hasOver: false, withoutOver: transcript, trigger: "" };
 }
 
-
-function triggerVoiceSend(forcedText) {
-  window.__sensiLastOverSendTs = window.__sensiLastOverSendTs || 0;
-  const now = Date.now();
-  if (now - window.__sensiLastOverSendTs < 1200) return;
-  window.__sensiLastOverSendTs = now;
-
-  const txt = cleanStr(forcedText || input.value || voiceBuffer);
-  if (!txt) return;
-
-  sendTextMessage(txt);
-  input.value = "";
-  voiceBuffer = "";
-  input.focus();
-  if (voiceHint) voiceHint.textContent = `✅ Envoyé (over)`;
-}
 async function startListening() {
   ensureVoiceUI();
 
@@ -723,7 +724,7 @@ async function startListening() {
   recognition = recognition || new SR();
 
   // Important: "over" en anglais => en-US
-  recognition.lang = "en-US";
+  recognition.lang = "fr-FR"; // dictée FR (on garde le trigger "over"/"ouvre"/"terminé")
   recognition.interimResults = true;
   recognition.continuous = true;
   recognition.maxAlternatives = 1;
@@ -749,63 +750,42 @@ async function startListening() {
 
   // Fix: on envoie sur FINAL seulement, en utilisant la détection robuste de "over"
   recognition.onresult = (event) => {
-  let interim = "";
-  let final = "";
+    let interim = "";
+    let final = "";
 
-  for (let i = event.resultIndex; i < event.results.length; i++) {
-    const r = event.results[i];
-    const txt = r[0]?.transcript || "";
-    if (r.isFinal) final += txt + " ";
-    else interim += txt + " ";
-  }
-
-  const interimClean = cleanStr(interim);
-  const finalClean = cleanStr(final);
-
-  // Affichage temps réel
-  const display = cleanStr(finalClean || interimClean);
-  if (display && voiceHint) {
-    voiceHint.textContent = `🗣️ ${display.slice(0, 80)}${display.length > 80 ? "…" : ""}`;
-  }
-
-  // Bufferise seulement les FINALS (évite les doublons Firefox)
-  if (finalClean) {
-    const normFinal = normalizeTranscript(finalClean);
-    const normOver = normalizeTranscript(VOICE_OVER_WORD);
-    // retire "over" si jamais il apparaît dans un segment final
-    const { hasOver, withoutOver } = hasOverWord(normFinal);
-    const chunk = cleanStr(withoutOver || "");
-    if (chunk) {
-      voiceBuffer = cleanStr(voiceBuffer ? `${voiceBuffer} ${chunk}` : chunk);
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const r = event.results[i];
+      const txt = r[0]?.transcript || "";
+      if (r.isFinal) final += txt + " ";
+      else interim += txt + " ";
     }
-    if (hasOver && VOICE_SEND_ON_OVER) {
-      triggerVoiceSend();
-      return;
-    }
-  }
 
-  // ✅ Détection 'over' même si la phrase reste en INTERIM (cas Firefox fréquent)
-  if (interimClean) {
-    const { hasOver, withoutOver } = hasOverWord(interimClean);
+    const display = cleanStr(final || interim);
+    if (!display) return;
 
-    // pour confort, on pré-remplit l'input (sans spammer)
-    const chunk = cleanStr(withoutOver || "");
-    if (VOICE_APPEND_TO_INPUT && chunk) {
-      const cur = cleanStr(input.value);
-      if (!cur || !cur.endsWith(chunk)) {
-        input.value = cur ? `${cur} ${chunk}` : chunk;
+    if (voiceHint) voiceHint.textContent = `🗣️ ${display.slice(0, 80)}${display.length > 80 ? "…" : ""}`;
+
+    if (cleanStr(final)) {
+      const { hasOver, withoutOver } = hasOverWord(final);
+
+      // append what was said (excluding "over") to input
+      const toAppend = cleanStr(withoutOver);
+      if (VOICE_APPEND_TO_INPUT && toAppend) {
+        const cur = cleanStr(input.value);
+        input.value = cur ? `${cur} ${toAppend}` : toAppend;
+      }
+
+      if (VOICE_SEND_ON_OVER && hasOver) {
+        const bufferText = cleanStr((input.value || "") + " " + (toAppend || ""));
+    const toSend = bufferText;
+    if (toSend) {
+          sendTextMessage(toSend);
+          input.value = "";
+          input.focus();
+        }
       }
     }
-
-    if (hasOver && VOICE_SEND_ON_OVER) {
-      // combine buffer + chunk, puis envoie
-      const combinedMsg = cleanStr(voiceBuffer ? `${voiceBuffer} ${chunk}` : chunk);
-      voiceBuffer = ""; // reset avant envoi
-      triggerVoiceSend(combinedMsg);
-      return;
-    }
-  }
-};
+  };
 
   try { recognition.start(); }
   catch (e) {
