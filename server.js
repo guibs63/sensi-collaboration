@@ -79,11 +79,8 @@ app.use(express.static(__dirname));
 // ==================================================
 function cleanEnv(v) { return String(v ?? "").trim(); }
 
-const APP_VERSION = process.env.APP_VERSION || "ultra-v3.4.4-persist";
-
-// ✅ Persistent storage root (Railway/Render): set DATA_DIR to a mounted/persistent path
-const STORAGE_ROOT = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || __dirname;
-const STORAGE_DIR = path.join(STORAGE_ROOT, "storage");
+const APP_VERSION = process.env.APP_VERSION || "ultra-v3.4.3";
+const STORAGE_DIR = path.join(__dirname, "storage");
 const HISTORY_FILE = path.join(STORAGE_DIR, "messages.json");
 const PROJECTS_FILE = path.join(STORAGE_DIR, "projects.json");
 const MEMORY_FILE = path.join(STORAGE_DIR, "global_memory.json");
@@ -173,23 +170,12 @@ function tailFile(filePath, maxLines = 200) {
 // ==================================================
 // HELPERS
 // ==================================================
-
-function writeJSONAtomic(file, data) {
-  try {
-    const tmp = file + ".tmp";
-    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf8");
-    fs.renameSync(tmp, file);
-  } catch (e) {
-    logLine("[storage] atomic write failed:", file, e?.message || e);
-    try { fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8"); } catch {}
-  }
-}
-
 function readJSON(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; }
 }
 function writeJSON(file, data) {
-  writeJSONAtomic(file, data);
+  try { fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8"); }
+  catch (e) { logLine("[storage] write failed:", file, e?.message || e); }
 }
 function cleanStr(v) { return String(v ?? "").trim(); }
 function safeProjectKey(project) {
@@ -282,15 +268,16 @@ app.get("/health", (req, res) => {
     logs: { enabled: true, protectedByToken: Boolean(LOGS_TOKEN) },
   });
 
-
 app.get("/debug/storage", (req, res) => {
   res.json({
     ok: true,
     STORAGE_ROOT,
     STORAGE_DIR,
+    PROJECTS_FILE,
+    HISTORY_FILE,
     hasProjectsFile: fs.existsSync(PROJECTS_FILE),
     hasHistoryFile: fs.existsSync(HISTORY_FILE),
-    projectsCount: Array.isArray(projects) ? projects.length : 0,
+    projects: Array.isArray(projects) ? projects : [],
     historyProjects: historyByProject ? Object.keys(historyByProject).length : 0,
   });
 });
@@ -301,6 +288,26 @@ app.get("/projects", (req, res) => res.json(listProjects()));
 // ✅ format “propre” si tu veux l’utiliser côté front moderne
 app.get("/projects/v2", (req, res) => res.json({ ok: true, projects: listProjects() }));
 
+
+// ✅ REST fallback for project creation (in case socket ACK is blocked)
+app.post("/projects/create", (req, res) => {
+  try {
+    const name = cleanStr(req.body?.name);
+    if (!isValidProjectName(name)) return res.status(400).json({ ok: false, message: "Nom invalide (2-50, lettres/chiffres/espaces/_-.)" });
+    if (projects.includes(name)) return res.status(409).json({ ok: false, message: "Projet déjà existant." });
+
+    projects.push(name);
+    projects = Array.from(new Set(projects.map(cleanStr).filter(Boolean)));
+    saveProjectsNow();
+    broadcastProjects();
+    logLine("[createProject] created:", n);
+
+    return res.json({ ok: true, project: name, projects: listProjects() });
+  } catch (e) {
+    logLine("[projects/create]", e?.message || e);
+    return res.status(500).json({ ok: false, message: "Erreur serveur création projet" });
+  }
+});
 app.get("/logs", (req, res) => {
   if (LOGS_TOKEN) {
     const token = cleanStr(req.query?.token);
@@ -503,6 +510,7 @@ io.on("connection", (socket) => {
 
   // ✅ createProject({name}) + createProject("name") + alias "create project"
   const handleCreateProject = (payload, ack) => {
+    logLine("[createProject] request:", payload);
     const { name } = normalizeCreatePayload(payload);
     const n = cleanStr(name);
 
