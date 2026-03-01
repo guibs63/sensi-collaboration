@@ -333,6 +333,32 @@ function sendTextMessage(text) {
   socket.emit("chatMessage", { username, userId: myUserId, message, project: currentProject });
 }
 
+
+// =======================
+// SPEECH-TO-TEXT fallback (Firefox)
+// =======================
+async function transcribeAudioBlob(blob) {
+  const fd = new FormData();
+  const ext = guessExtFromMime(blob.type) || "webm";
+  fd.append("audio", new File([blob], `voice_${Date.now()}.${ext}`, { type: blob.type || "audio/webm" }));
+
+  const res = await fetch("/transcribe", { method: "POST", body: fd });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data?.ok) {
+    throw new Error(data?.error || `Transcription failed (${res.status})`);
+  }
+  return cleanStr(data.text || "");
+}
+
+function stripVoiceTrigger(text) {
+  // "over" is often transcribed as "ouvre"/"terminé" on FR keyboards
+  return cleanStr(text.replace(/\b(over|ouvre|termin[eé]|termine|terminer|terminée|terminee)\b/gi, " "));
+}
+
+function hasVoiceTrigger(text) {
+  return /\b(over|ouvre|termin[eé]|termine|terminer|terminée|terminee)\b/i.test(text);
+}
+
 // form submit
 form.addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -471,6 +497,12 @@ socket.on("connect", async () => {
 // =========================
 let recognition = null;
 let isListening = false;
+let voiceMode = null; // "speech" | "chunk"
+let chunkRecorder = null;
+let chunkQueue = Promise.resolve();
+let chunkTextBuffer = "";
+let chunkStartedAt = 0;
+
 
 let mediaStream = null;
 let audioCtx = null;
@@ -525,7 +557,7 @@ function ensureVoiceUI() {
 
   voiceHint = document.createElement("span");
   voiceHint.style.cssText = "color:#666;font-size:12px;";
-  voiceHint.textContent = `Dites “… over” (ou “ouvre” / “terminé”) pour envoyer.`;
+  voiceHint.textContent = `Dites “… ${VOICE_OVER_WORD}” pour envoyer.`;
 
   fftCanvas = document.createElement("canvas");
   fftCanvas.width = 360;
@@ -704,11 +736,7 @@ function hasOverWord(transcript) {
 async function startListening() {
   ensureVoiceUI();
 
-  if (!("webkitSpeechRecognition" in window) && !("SpeechRecognition" in window)) {
-    alert("Reconnaissance vocale non supportée sur ce navigateur.");
-    return;
-  }
-
+  // Always get mic + FFT (waves) first (works on Firefox too)
   try {
     await ensureMicStream();
     await ensureAnalyser();
@@ -719,103 +747,144 @@ async function startListening() {
     return;
   }
 
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  recognition = recognition || new SR();
+  // ✅ Chrome/Edge: Web Speech API
+  if (("webkitSpeechRecognition" in window) || ("SpeechRecognition" in window)) {
+    voiceMode = "speech";
 
-  // Important: "over" en anglais => en-US
-  recognition.lang = "fr-FR"; // Firefox FR (trigger: over/ouvre/terminé) // dictée FR (on garde le trigger "over"/"ouvre"/"terminé")
-  recognition.interimResults = true;
-  recognition.continuous = true;
-  recognition.maxAlternatives = 1;
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    recognition = new SR();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = "fr-FR";
 
-  recognition.onstart = () => {
+    recognition.onerror = (e) => {
+      console.warn("SpeechRecognition error", e);
+      if (voiceHint) voiceHint.textContent = `⚠️ Voice: ${e?.error || "error"}`;
+    };
+
+    recognition.onend = () => {
+      // if user is still listening, restart (Chrome can stop unexpectedly)
+      if (isListening) {
+        try { recognition.start(); } catch {}
+      }
+    };
+
+    recognition.onresult = (event) => {
+      let interim = "";
+      let final = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const r = event.results[i];
+        const txt = r[0]?.transcript || "";
+        if (r.isFinal) final += txt + " ";
+        else interim += txt + " ";
+      }
+
+      const combined = cleanStr(final || interim);
+      if (!combined) return;
+
+      if (voiceHint) voiceHint.textContent = `🗣️ ${combined.slice(0, 80)}${combined.length > 80 ? "…" : ""}`;
+
+      if (VOICE_APPEND_TO_INPUT) {
+        const cur = cleanStr(input.value);
+        const add = stripVoiceTrigger(combined);
+        if (add && (!cur || !cur.endsWith(add))) input.value = cur ? `${cur} ${add}` : add;
+      }
+
+      if (VOICE_SEND_ON_OVER && hasVoiceTrigger(combined)) {
+        const msg = cleanStr(stripVoiceTrigger(combined) || input.value);
+        if (msg) {
+          sendTextMessage(msg);
+          input.value = "";
+          input.focus();
+          if (voiceHint) voiceHint.textContent = "✅ Envoyé (voice)";
+        }
+      }
+    };
+
     isListening = true;
     setVoiceButtonState();
-    if (voiceHint) voiceHint.textContent = `🎧 Écoute… dis “… over” (ou “ouvre” / “terminé”) pour envoyer.`;
-  };
-
-  recognition.onerror = (e) => {
-    console.warn("Speech error:", e?.error);
-    addSystem(`Voice error: ${e?.error || "unknown"}`);
-  };
-
-  recognition.onend = () => {
-    if (isListening) {
-      try { recognition.start(); } catch {}
-    } else {
-      stopFft();
-    }
-  };
-
-  // Fix: on envoie sur FINAL seulement, en utilisant la détection robuste de "over"
-  recognition.onresult = (event) => {
-    // Buffer final + affichage live dans l'input
-    window.__sensiVoiceFinalBuffer = window.__sensiVoiceFinalBuffer || "";
-
-    let interim = "";
-    let finalChunk = "";
-
-    for (let i = event.resultIndex; i < event.results.length; i++) {
-      const r = event.results[i];
-      const txt = r[0]?.transcript || "";
-      if (r.isFinal) finalChunk += txt + " ";
-      else interim += txt + " ";
-    }
-
-    if (cleanStr(finalChunk)) {
-      window.__sensiVoiceFinalBuffer = cleanStr(window.__sensiVoiceFinalBuffer + " " + finalChunk);
-    }
-
-    const combinedRaw = cleanStr(window.__sensiVoiceFinalBuffer + " " + interim);
-    if (!combinedRaw) return;
-
-    // Affiche ce que Firefox comprend (utile pour debug)
-    if (voiceHint) voiceHint.textContent = `🗣️ ${combinedRaw.slice(0, 80)}${combinedRaw.length > 80 ? "…" : ""}`;
-
-    // Détecte trigger sur RAW + sur NORMALISÉ (plus tolérant)
-    const trigRe = /(over|ouvre|termin(?:e|é|ee|ée)|termine|terminer)/i;
-    const hasTrig = trigRe.test(combinedRaw) || trigRe.test(normalizeTranscript(combinedRaw));
-    if (!hasTrig) {
-      // Mise à jour live de l'input avec la dictée (sans triggers)
-      const cleanedLive = cleanStr(combinedRaw.replace(trigRe, ""));
-      if (VOICE_APPEND_TO_INPUT && cleanedLive) {
-        input.value = cleanedLive;
-      }
-      return;
-    }
-
-    // On retire le trigger et on envoie le reste (ou l'input si déjà rempli)
-    const cleaned = cleanStr(combinedRaw.replace(trigRe, ""));
-    const toSend = cleanStr(input.value) || cleaned;
-
-    if (!toSend) return;
-
-    // Anti double-envoi (Firefox répète souvent)
-    window.__sensiLastOverSendTs = window.__sensiLastOverSendTs || 0;
-    const now = Date.now();
-    if (now - window.__sensiLastOverSendTs < 1200) return;
-    window.__sensiLastOverSendTs = now;
-
-    sendTextMessage(toSend);
-
-    // Reset buffers/UI
-    window.__sensiVoiceFinalBuffer = "";
-    input.value = "";
-    input.focus();
-    if (voiceHint) voiceHint.textContent = "✅ Envoyé (voice)";
-  };
-  try { recognition.start(); }
-  catch (e) {
-    console.error(e);
-    addSystem("Voice start failed.");
+    if (voiceHint) voiceHint.textContent = `🎧 Écoute (SpeechRecognition) : dis "over" (ou "ouvre"/"terminé") pour envoyer.`;
+    try { recognition.start(); } catch {}
+    return;
   }
+
+  // ✅ Firefox: pas de Web Speech API -> dictée via envoi d'extraits audio au serveur (/transcribe)
+  voiceMode = "chunk";
+  chunkTextBuffer = "";
+  chunkStartedAt = Date.now();
+
+  if (voiceHint) voiceHint.textContent = `🎧 Dictée Firefox : parle, et dis "over" / "ouvre" / "terminé" pour envoyer.`;
+
+  // start recorder in small chunks (2.5s) for near real-time transcription
+  try {
+    chunkRecorder = new MediaRecorder(mediaStream, { mimeType: getBestMimeType() });
+  } catch (e) {
+    // fallback without explicit mimeType
+    chunkRecorder = new MediaRecorder(mediaStream);
+  }
+
+  chunkRecorder.ondataavailable = (ev) => {
+    const blob = ev.data;
+    if (!blob || blob.size < 800) return;
+
+    // serialize transcribe requests to keep order
+    chunkQueue = chunkQueue.then(async () => {
+      try {
+        const text = await transcribeAudioBlob(blob);
+        if (!text) return;
+
+        chunkTextBuffer = cleanStr(chunkTextBuffer + " " + text);
+
+        if (voiceHint) {
+          const preview = cleanStr(chunkTextBuffer).slice(0, 80);
+          voiceHint.textContent = `🗣️ ${preview}${chunkTextBuffer.length > 80 ? "…" : ""}`;
+        }
+
+        // write live into input
+        if (VOICE_APPEND_TO_INPUT) {
+          const cleaned = stripVoiceTrigger(chunkTextBuffer);
+          if (cleaned) input.value = cleaned;
+        }
+
+        // trigger send
+        if (VOICE_SEND_ON_OVER && hasVoiceTrigger(text)) {
+          const msg = cleanStr(stripVoiceTrigger(chunkTextBuffer));
+          if (msg) sendTextMessage(msg);
+          input.value = "";
+          input.focus();
+          chunkTextBuffer = "";
+          stopListening();
+        }
+      } catch (err) {
+        console.warn("transcribe chunk failed", err);
+      }
+    });
+  };
+
+  chunkRecorder.onstop = () => {
+    // nothing
+  };
+
+  isListening = true;
+  setVoiceButtonState();
+  // collect chunks every 2500ms
+  try { chunkRecorder.start(2500); } catch { chunkRecorder.start(); }
 }
 
 function stopListening() {
   isListening = false;
   setVoiceButtonState();
   if (voiceHint) voiceHint.textContent = `⏸️ Écoute stoppée.`;
+
   try { recognition && recognition.stop(); } catch {}
+
+  // Firefox chunk mode
+  try {
+    if (chunkRecorder && chunkRecorder.state === "recording") chunkRecorder.stop();
+  } catch {}
+  chunkRecorder = null;
+  voiceMode = null;
+
   stopFft();
 }
 

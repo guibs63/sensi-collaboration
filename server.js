@@ -1,5 +1,7 @@
 
 
+
+
 // 
 "use strict";
 
@@ -333,6 +335,54 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage,
   limits: { fileSize: MAX_UPLOAD_BYTES },
+});
+
+
+// =======================
+// Speech-to-text (Firefox fallback)
+// POST /transcribe  (multipart/form-data: audio=<file>)
+// =======================
+const memUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: Math.min(MAX_UPLOAD_BYTES, 12 * 1024 * 1024) },
+});
+
+app.post("/transcribe", memUpload.single("audio"), async (req, res) => {
+  let tmpPath = null;
+  try {
+    if (!OPENAI_API_KEY) return res.status(500).json({ ok: false, error: "OPENAI_API_KEY manquante." });
+    if (!req.file) return res.status(400).json({ ok: false, error: "Aucun audio." });
+
+    // Save to /tmp to give the SDK a filename/extension (some formats need it)
+    const mime = (req.file.mimetype || "").toLowerCase();
+    let ext = "webm";
+    if (mime.includes("wav")) ext = "wav";
+    else if (mime.includes("mpeg") || mime.includes("mp3")) ext = "mp3";
+    else if (mime.includes("mp4") || mime.includes("m4a")) ext = "m4a";
+    else if (mime.includes("ogg")) ext = "ogg";
+
+    tmpPath = path.join("/tmp", `sensi_voice_${Date.now()}_${crypto.randomBytes(4).toString("hex")}.${ext}`);
+    await fs.promises.writeFile(tmpPath, req.file.buffer);
+
+    const openai = getOpenAIClient();
+
+    const model = process.env.TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe";
+    const result = await openai.audio.transcriptions.create({
+      file: fs.createReadStream(tmpPath),
+      model,
+      language: "fr",
+    });
+
+    const text = (result && typeof result === "object" && "text" in result) ? result.text : String(result || "");
+    return res.json({ ok: true, text: cleanStr(text) });
+  } catch (e) {
+    console.error("TRANSCRIBE_ERROR:", e);
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+  } finally {
+    if (tmpPath) {
+      fs.promises.unlink(tmpPath).catch(() => {});
+    }
+  }
 });
 
 app.post("/upload", upload.single("file"), async (req, res) => {
