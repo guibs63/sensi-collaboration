@@ -1,10 +1,18 @@
-
-
-
-
-// guibs:/client.js (COMPLET) — ULTRA v3.4.3 CLIENT (Fix "over" send + Firefox audio UX) ✅
+// guibs:/client.js (COMPLET) — ULTRA v3.4.3 CLIENT (Railway compatible) ✅
 "use strict";
 
+/**
+ * ✅ Ce fichier est la version "complète" (voice + FFT + upload + projets)
+ * Correction principale vs ton client:
+ * - suppression d’un gros bloc de code "fantôme" resté après `return;` dans startListening()
+ *   (ça cassait la structure et peut déclencher des comportements bizarres / erreurs à l’exécution)
+ * - correction d’un `projectsUpdate` mal indenté (updateVoiceUiGate() au milieu)
+ * - garde toutes tes features (pas de "version light")
+ */
+
+// ======================================================
+// SOCKET
+// ======================================================
 const socket = io(window.location.origin, {
   transports: ["websocket", "polling"],
   reconnection: true,
@@ -21,7 +29,6 @@ const ENABLE_VOICE = true;
 const VOICE_APPEND_TO_INPUT = true;
 const VOICE_SEND_ON_OVER = true;
 const VOICE_OVER_WORD = "over";
-
 
 // Firefox/fr-FR peut transcrire "over" en "ouvre" / "terminé"
 const VOICE_TRIGGERS = ["over", "ouvre", "terminé", "termine", "terminée", "terminee"];
@@ -104,11 +111,6 @@ socket.on("connect_error", (err) => setStatusBar(`socket: error (${err?.message 
 // utils
 function cleanStr(v) { return String(v ?? "").trim(); }
 
-function isReadyForVoice() {
-  // Voice should require a joined project + username to avoid "listening in the void"
-  return Boolean(cleanStr(currentProject) && cleanStr(currentUsername || usernameInput?.value));
-}
-
 function requireReadyForVoice() {
   if (!cleanStr(usernameInput?.value)) {
     alert("Entre un pseudo puis clique Rejoindre avant d'activer la voix 🙂");
@@ -120,7 +122,6 @@ function requireReadyForVoice() {
   }
   return true;
 }
-
 
 function escapeHtml(str) {
   return String(str ?? "")
@@ -300,22 +301,16 @@ if (createProjectBtn && newProjectInput) {
     const name = cleanStr(nameRaw);
     if (!name) return;
 
-    // Use Socket.IO ACK so the UI updates even if projectsUpdate is delayed/cached
     socket.emit("createProject", { name }, (resp) => {
       if (!resp || resp.ok !== true) {
         alert(resp?.message || "Erreur création projet");
         return;
       }
 
-      // Update dropdown immediately
       const list = Array.isArray(resp.projects) ? resp.projects : [];
       if (list.length > 0) setProjectsOptions(list, false);
-
-      // Auto-select created project
       if (resp.project) projectSelect.value = resp.project;
 
-      // Optional: auto-join freshly created project if already connected
-      // (we don't force join; user can click Rejoindre)
       addSystem(`✅ Projet créé: "${resp.project}"`);
     });
   };
@@ -334,7 +329,6 @@ if (createProjectBtn && newProjectInput) {
     }
   });
 }
-
 
 if (deleteProjectBtn) {
   deleteProjectBtn.addEventListener("click", () => {
@@ -378,10 +372,17 @@ function sendTextMessage(text) {
   socket.emit("chatMessage", { username, userId: myUserId, message, project: currentProject });
 }
 
-
 // =======================
 // SPEECH-TO-TEXT fallback (Firefox)
 // =======================
+function guessExtFromMime(mime) {
+  const m = String(mime || "");
+  if (m.includes("ogg")) return "ogg";
+  if (m.includes("mp4")) return "mp4";
+  if (m.includes("webm")) return "webm";
+  return "";
+}
+
 async function transcribeAudioBlob(blob) {
   const fd = new FormData();
   const ext = guessExtFromMime(blob.type) || "webm";
@@ -389,17 +390,13 @@ async function transcribeAudioBlob(blob) {
 
   const res = await fetch("/transcribe", { method: "POST", body: fd });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok || !data?.ok) {
-    throw new Error(data?.error || `Transcription failed (${res.status})`);
-  }
+  if (!res.ok || !data?.ok) throw new Error(data?.error || `Transcription failed (${res.status})`);
   return cleanStr(data.text || "");
 }
 
 function stripVoiceTrigger(text) {
-  // "over" is often transcribed as "ouvre"/"terminé" on FR keyboards
   return cleanStr(text.replace(/\b(over|ouvre|termin[eé]|termine|terminer|terminée|terminee)\b/gi, " "));
 }
-
 function hasVoiceTrigger(text) {
   return /\b(over|ouvre|termin[eé]|termine|terminer|terminée|terminee)\b/i.test(text);
 }
@@ -474,15 +471,14 @@ socket.on("systemMessage", (msg) => {
 
 socket.on("presenceUpdate", (payload) => {
   // optional in this minimal client: ignore if you want
+  // (tu peux remplir usersList/usersCount ici si tu le souhaites)
 });
 
 socket.on("projectsUpdate", (payload) => {
   const list = Array.isArray(payload?.projects) ? payload.projects : [];
   setProjectsOptions(list, true);
 
-  
-  updateVoiceUiGate();
-const want = cleanStr(localStorage.getItem(LS_LAST_PROJECT));
+  const want = cleanStr(localStorage.getItem(LS_LAST_PROJECT));
   if (want && list.includes(want)) projectSelect.value = want;
 
   if (currentProject && !list.includes(currentProject)) {
@@ -491,6 +487,8 @@ const want = cleanStr(localStorage.getItem(LS_LAST_PROJECT));
     clearChat();
     addSystem("Le projet courant a été supprimé. Choisis un autre projet puis Rejoindre.");
   }
+
+  updateVoiceUiGate();
 });
 
 socket.on("projectDeleted", ({ project }) => {
@@ -517,12 +515,12 @@ async function loadProjectsOnce() {
     const res = await fetch("/projects", { cache: "no-store" });
     const data = await res.json().catch(() => ({}));
 
-    // compat: /projects may return array
     const list = Array.isArray(data) ? data : Array.isArray(data?.projects) ? data.projects : [];
     if (list.length > 0) {
       setProjectsOptions(list, true);
       const want = cleanStr(last?.p);
       if (want && list.includes(want)) projectSelect.value = want;
+      updateVoiceUiGate();
       return;
     }
   } catch (_) {}
@@ -540,22 +538,11 @@ socket.on("connect", async () => {
 });
 
 // =========================
-// VOICE + FFT (Fix "over")
+// VOICE + FFT
 // =========================
 let recognition = null;
 let isListening = false;
-let voiceMode = null; // "speech" | "chunk"
-let chunkRecorder = null; // legacy name (kept)
-let segRecorder = null; // Firefox rolling segments recorder
-let segChunks = [];
-let segTimer = null;
-let segInFlight = false;
-let segAccumulatedText = "";
-
-let chunkQueue = Promise.resolve();
-let chunkTextBuffer = "";
-let chunkStartedAt = 0;
-
+let voiceMode = null; // "speech" | "segment"
 
 let mediaStream = null;
 let audioCtx = null;
@@ -568,6 +555,14 @@ let recorder = null;
 let recChunks = [];
 let recBlob = null;
 let recStopTimer = null;
+
+// Firefox rolling segments
+let segRecorder = null;
+let segChunks = [];
+let segTimer = null;
+let segInFlight = false;
+let segAccumulatedText = "";
+let segQueue = Promise.resolve();
 
 // UI injected
 let voiceBar = null;
@@ -601,6 +596,7 @@ function updateVoiceUiGate() {
 
 function ensureVoiceUI() {
   if (voiceBar) return;
+
   voiceBar = document.createElement("div");
   voiceBar.id = "voice-bar";
 
@@ -635,6 +631,7 @@ function ensureVoiceUI() {
   form.parentNode.insertBefore(voiceBar, form.nextSibling);
 
   updateVoiceUiGate();
+
   btnVoice.addEventListener("click", async () => {
     if (!ENABLE_VOICE) return;
     if (!requireReadyForVoice()) return;
@@ -666,16 +663,9 @@ function ensureVoiceUI() {
       if (uploadState) uploadState.textContent = "";
     } finally {
       btnSendRec.disabled = !recBlob;
+      updateVoiceUiGate();
     }
   });
-}
-
-function guessExtFromMime(mime) {
-  const m = String(mime || "");
-  if (m.includes("ogg")) return "ogg";
-  if (m.includes("mp4")) return "mp4";
-  if (m.includes("webm")) return "webm";
-  return "";
 }
 
 function setVoiceButtonState() {
@@ -694,7 +684,6 @@ async function ensureAnalyser() {
 
   await ensureMicStream();
 
-  // Firefox: AudioContext parfois bloqué sans geste user
   if (!audioCtx) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     if (FIREFOX_FORCE_USER_GESTURE_BEFORE_AUDIOCTX && audioCtx.state === "suspended") {
@@ -757,52 +746,13 @@ function startFft() {
   fftAnim = requestAnimationFrame(draw);
 }
 
-// Key fix: detect "over" reliably even if recognition gives punctuation/casing
-function normalizeTranscript(s) {
-  return cleanStr(s)
-    .toLowerCase()
-    .replace(/[’']/g, "'")
-    .replace(/[^\p{L}\p{N}\s']/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-// Returns { hasOver, withoutOver, trigger }
-function hasOverWord(transcript) {
-  const norm = normalizeTranscript(transcript);
-  if (!norm) return { hasOver: false, withoutOver: transcript, trigger: "" };
-
-  // Try each trigger (over / ouvre / terminé …)
-  for (const t of VOICE_TRIGGERS) {
-    const trig = normalizeTranscript(t);
-    if (!trig) continue;
-
-    // exact
-    if (norm === trig) return { hasOver: true, withoutOver: "", trigger: trig };
-
-    // at end
-    if (norm.endsWith(" " + trig)) {
-      const without = norm.slice(0, -(trig.length + 1)).trim();
-      return { hasOver: true, withoutOver: without, trigger: trig };
-    }
-
-    // token somewhere (rare but ok)
-    const token = " " + trig + " ";
-    const idx = (" " + norm + " ").indexOf(token);
-    if (idx >= 0) {
-      const cleaned = (" " + norm + " ").slice(0, idx).trim();
-      return { hasOver: true, withoutOver: cleaned, trigger: trig };
-    }
-  }
-
-  return { hasOver: false, withoutOver: transcript, trigger: "" };
-}
-
+// ======================================================
+// LISTENING
+// ======================================================
 async function startListening() {
   if (!requireReadyForVoice()) return;
   ensureVoiceUI();
 
-  // Always get mic + FFT (waves) first (works on Firefox too)
   try {
     await ensureMicStream();
     await ensureAnalyser();
@@ -829,7 +779,6 @@ async function startListening() {
     };
 
     recognition.onend = () => {
-      // if user is still listening, restart (Chrome can stop unexpectedly)
       if (isListening) {
         try { recognition.start(); } catch {}
       }
@@ -853,7 +802,7 @@ async function startListening() {
       if (VOICE_APPEND_TO_INPUT) {
         const cur = cleanStr(input.value);
         const add = stripVoiceTrigger(combined);
-        if (add && (!cur || !cur.endsWith(add))) input.value = cur ? `${cur} ${add}` : add;
+        if (add) input.value = cur ? `${cur} ${add}` : add;
       }
 
       if (VOICE_SEND_ON_OVER && hasVoiceTrigger(combined)) {
@@ -869,139 +818,95 @@ async function startListening() {
 
     isListening = true;
     setVoiceButtonState();
-    if (voiceHint) voiceHint.textContent = `🎧 Écoute (SpeechRecognition) : dis "over" (ou "ouvre"/"terminé") pour envoyer.`;
+    if (voiceHint) voiceHint.textContent = `🎧 Écoute (SpeechRecognition) : dis "${VOICE_OVER_WORD}" (ou "ouvre"/"terminé") pour envoyer.`;
     try { recognition.start(); } catch {}
     return;
   }
 
-  // ✅ Firefox: pas de Web Speech API -> dictée via segments valides (/transcribe)
-// Problème classique: les "chunks" MediaRecorder sont parfois illisibles => 400 "corrupted/unsupported".
-// Solution: on enregistre des segments *complets* (ex: 4s), on stop => Blob valide, on transcrit, puis on redémarre.
-voiceMode = "chunk";
-segAccumulatedText = "";
-chunkTextBuffer = "";
-chunkStartedAt = Date.now();
+  // ✅ Firefox: dictée via segments STOP/START => blob valide => /transcribe
+  voiceMode = "segment";
+  segAccumulatedText = "";
+  if (voiceHint) voiceHint.textContent = `🎧 Dictée Firefox : parle, puis dis "${VOICE_OVER_WORD}" / "ouvre" / "terminé" pour envoyer.`;
 
-if (voiceHint) voiceHint.textContent = `🎧 Dictée Firefox : parle, et dis "over" / "ouvre" / "terminé" pour envoyer.`;
+  const SEG_MS = 4000;
 
-const SEG_MS = 4000;
-
-const startOneSegment = () => {
-  if (!isListening) return;
-  try {
-    segChunks = [];
-    const prefer = pickAudioMime();
+  const startOneSegment = () => {
+    if (!isListening) return;
 
     try {
-      segRecorder = new MediaRecorder(mediaStream, prefer ? { mimeType: prefer } : undefined);
-    } catch {
-      segRecorder = new MediaRecorder(mediaStream);
-    }
-
-    segRecorder.ondataavailable = (ev) => {
-      if (ev.data && ev.data.size > 0) segChunks.push(ev.data);
-    };
-
-    segRecorder.onstop = () => {
-      if (!isListening) return;
-      const blob = new Blob(segChunks, { type: segRecorder?.mimeType || (segChunks[0]?.type || "audio/webm") });
       segChunks = [];
+      const prefer = pickAudioMime();
 
-      chunkQueue = chunkQueue.then(async () => {
-        if (segInFlight) return;
-        segInFlight = true;
-        try {
-          if (!blob || blob.size < 10 * 1024) return;
-
-          const text = await transcribeAudioBlob(blob);
-          if (!text) return;
-
-          segAccumulatedText = cleanStr((segAccumulatedText + " " + text).slice(-2500));
-          chunkTextBuffer = segAccumulatedText;
-
-          if (voiceHint) {
-            const preview = cleanStr(chunkTextBuffer).slice(0, 90);
-            voiceHint.textContent = `🗣️ ${preview}${chunkTextBuffer.length > 90 ? "…" : ""}`;
-          }
-
-          if (VOICE_APPEND_TO_INPUT) {
-            const cleaned = stripVoiceTrigger(chunkTextBuffer);
-            if (cleaned) input.value = cleaned;
-          }
-
-          if (VOICE_SEND_ON_OVER && hasVoiceTrigger(chunkTextBuffer)) {
-            const msg = cleanStr(stripVoiceTrigger(chunkTextBuffer));
-            if (msg) sendTextMessage(msg);
-            input.value = "";
-            input.focus();
-            segAccumulatedText = "";
-            chunkTextBuffer = "";
-            stopListening();
-            return;
-          }
-        } catch (err) {
-          console.warn("transcribe segment failed", err);
-        } finally {
-          segInFlight = false;
-        }
-      }).finally(() => {
-        if (isListening) startOneSegment();
-      });
-    };
-
-    segRecorder.start(); // no timeslice => finalized container on stop
-    clearTimeout(segTimer);
-    segTimer = setTimeout(() => {
-      try { if (segRecorder && segRecorder.state === "recording") segRecorder.stop(); } catch {}
-    }, SEG_MS);
-  } catch (e) {
-    console.error(e);
-    if (voiceHint) voiceHint.textContent = "⚠️ Dictée Firefox: enregistrement impossible.";
-  }
-};
-
-isListening = true;
-setVoiceButtonState();
-startOneSegment();
-return;
-
-
-        chunkTextBuffer = cleanStr(chunkTextBuffer + " " + text);
-
-        if (voiceHint) {
-          const preview = cleanStr(chunkTextBuffer).slice(0, 80);
-          voiceHint.textContent = `🗣️ ${preview}${chunkTextBuffer.length > 80 ? "…" : ""}`;
-        }
-
-        // write live into input
-        if (VOICE_APPEND_TO_INPUT) {
-          const cleaned = stripVoiceTrigger(chunkTextBuffer);
-          if (cleaned) input.value = cleaned;
-        }
-
-        // trigger send
-        if (VOICE_SEND_ON_OVER && hasVoiceTrigger(text)) {
-          const msg = cleanStr(stripVoiceTrigger(chunkTextBuffer));
-          if (msg) sendTextMessage(msg);
-          input.value = "";
-          input.focus();
-          chunkTextBuffer = "";
-          stopListening();
-        }
-      } catch (err) {
-        console.warn("transcribe chunk failed", err);
+      try {
+        segRecorder = new MediaRecorder(mediaStream, prefer ? { mimeType: prefer } : undefined);
+      } catch {
+        segRecorder = new MediaRecorder(mediaStream);
       }
-    });
-  };
 
-  chunkRecorder.onstop = () => {
-    // nothing
+      segRecorder.ondataavailable = (ev) => {
+        if (ev.data && ev.data.size > 0) segChunks.push(ev.data);
+      };
+
+      segRecorder.onstop = () => {
+        if (!isListening) return;
+
+        const blob = new Blob(segChunks, { type: segRecorder?.mimeType || (segChunks[0]?.type || "audio/webm") });
+        segChunks = [];
+
+        segQueue = segQueue.then(async () => {
+          if (segInFlight) return;
+          segInFlight = true;
+          try {
+            if (!blob || blob.size < 10 * 1024) return;
+
+            const text = await transcribeAudioBlob(blob);
+            if (!text) return;
+
+            segAccumulatedText = cleanStr((segAccumulatedText + " " + text).slice(-2500));
+
+            if (voiceHint) {
+              const preview = segAccumulatedText.slice(0, 90);
+              voiceHint.textContent = `🗣️ ${preview}${segAccumulatedText.length > 90 ? "…" : ""}`;
+            }
+
+            if (VOICE_APPEND_TO_INPUT) {
+              const cleaned = stripVoiceTrigger(segAccumulatedText);
+              if (cleaned) input.value = cleaned;
+            }
+
+            if (VOICE_SEND_ON_OVER && hasVoiceTrigger(segAccumulatedText)) {
+              const msg = cleanStr(stripVoiceTrigger(segAccumulatedText));
+              if (msg) sendTextMessage(msg);
+              input.value = "";
+              input.focus();
+              segAccumulatedText = "";
+              stopListening();
+              return;
+            }
+          } catch (err) {
+            console.warn("transcribe segment failed", err);
+          } finally {
+            segInFlight = false;
+          }
+        }).finally(() => {
+          if (isListening) startOneSegment();
+        });
+      };
+
+      segRecorder.start(); // no timeslice => container finalized on stop
+      clearTimeout(segTimer);
+      segTimer = setTimeout(() => {
+        try { if (segRecorder && segRecorder.state === "recording") segRecorder.stop(); } catch {}
+      }, SEG_MS);
+    } catch (e) {
+      console.error(e);
+      if (voiceHint) voiceHint.textContent = "⚠️ Dictée Firefox: enregistrement impossible.";
+    }
   };
 
   isListening = true;
   setVoiceButtonState();
-  // collect chunks every 2500ms
-  try { chunkRecorder.start(2500); } catch { chunkRecorder.start(); }
+  startOneSegment();
 }
 
 function stopListening() {
@@ -1010,6 +915,7 @@ function stopListening() {
   if (voiceHint) voiceHint.textContent = `⏸️ Écoute stoppée.`;
 
   try { recognition && recognition.stop(); } catch {}
+  recognition = null;
 
   // Firefox segment mode
   try { if (segTimer) clearTimeout(segTimer); } catch {}
@@ -1019,20 +925,17 @@ function stopListening() {
   segChunks = [];
   segInFlight = false;
   segAccumulatedText = "";
-  chunkRecorder = null;
   voiceMode = null;
 
   stopFft();
 }
 
-// Recording
+// ======================================================
+// RECORDING (upload audio as file)
+// ======================================================
 async function startRecording() {
   if (!requireReadyForVoice()) return;
   ensureVoiceUI();
-
-  if (!currentProject) return alert("Rejoins un projet d’abord 🙂");
-  const username = cleanStr(usernameInput.value);
-  if (!username) return alert("Entre un pseudo 🙂");
 
   try {
     await ensureMicStream();
@@ -1066,6 +969,7 @@ async function startRecording() {
     btnSendRec.disabled = !recBlob;
     btnRec.textContent = "⏺️ Enregistrer";
     if (voiceHint) voiceHint.textContent = "🎙️ Audio prêt. Clique « Envoyer audio ».";
+    updateVoiceUiGate();
   };
 
   recorder.start(250);
@@ -1089,6 +993,7 @@ function stopRecording() {
   if (!ENABLE_VOICE) return;
   ensureVoiceUI();
   setVoiceButtonState();
+  updateVoiceUiGate();
 })();
 
 window.addEventListener("beforeunload", () => {
