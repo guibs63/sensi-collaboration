@@ -1,6 +1,6 @@
 
 
-<script>
+
 // guibs:/server.js (COMPLET) — ULTRA v3.4.3 — corrigé Railway ✅
 // Fix principal: supprimer tout \" (copier-coller échappé) dans le code JS, sinon Node crash au parse.
 "use strict";
@@ -585,4 +585,3 @@ server.listen(PORT, "0.0.0.0", () => {
   logLine("Web:", webModeLabel());
   logLine("Audio:", { autoTranscriptMessage: AUDIO_AUTO_TRANSCRIPT_MESSAGE, lang: AUDIO_TRANSCRIPT_LANGUAGE });
 });
-</script>
