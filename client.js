@@ -1,14 +1,6 @@
 // guibs:/client.js (COMPLET) — ULTRA v3.4.3 CLIENT (Railway compatible) ✅
+// VOICE fix: "over / au revoir" = triggers d’envoi, mais JAMAIS ajoutés au texte final.
 "use strict";
-
-/**
- * ✅ Ce fichier est la version "complète" (voice + FFT + upload + projets)
- * Correction principale vs ton client:
- * - suppression d’un gros bloc de code "fantôme" resté après `return;` dans startListening()
- *   (ça cassait la structure et peut déclencher des comportements bizarres / erreurs à l’exécution)
- * - correction d’un `projectsUpdate` mal indenté (updateVoiceUiGate() au milieu)
- * - garde toutes tes features (pas de "version light")
- */
 
 // ======================================================
 // SOCKET
@@ -30,8 +22,25 @@ const VOICE_APPEND_TO_INPUT = true;
 const VOICE_SEND_ON_OVER = true;
 const VOICE_OVER_WORD = "over";
 
-// Firefox/fr-FR peut transcrire "over" en "ouvre" / "terminé"
-const VOICE_TRIGGERS = ["over", "ouvre", "terminé", "termine", "terminée", "terminee"];
+/**
+ * ✅ Triggers:
+ * - "over" (cible)
+ * - Firefox/fr-FR peut transcrire "over" en "ouvre"/"terminé"
+ * - et parfois "au revoir" (ou "au-revoir" / "aurevoir")
+ */
+const VOICE_TRIGGERS = [
+  "over",
+  "ouvre",
+  "terminé",
+  "termine",
+  "terminée",
+  "terminee",
+  "terminer",
+  "au revoir",
+  "au-revoir",
+  "aurevoir",
+];
+
 // Firefox: éviter blocage autoplay / permissions
 const FIREFOX_FORCE_USER_GESTURE_BEFORE_AUDIOCTX = true;
 
@@ -394,11 +403,35 @@ async function transcribeAudioBlob(blob) {
   return cleanStr(data.text || "");
 }
 
-function stripVoiceTrigger(text) {
-  return cleanStr(text.replace(/\b(over|ouvre|termin[eé]|termine|terminer|terminée|terminee)\b/gi, " "));
+/**
+ * ✅ Trigger handling (END-ONLY):
+ * - On déclenche seulement si le trigger est en fin (avec ponctuation possible).
+ * - On retire le trigger et la ponctuation qui suit, sans toucher au reste.
+ */
+function buildTriggerEndRegex() {
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const parts = VOICE_TRIGGERS
+    .map((t) => cleanStr(t))
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length) // multi-mots d'abord ("au revoir")
+    .map(esc);
+
+  // ex: /(au\s+revoir|over|ouvre|termin[eé]...)\s*[.!?,;:…]*\s*$/i
+  return new RegExp(`(?:${parts.join("|")})\\s*[\\.!\\?,;:\\u2026]*\\s*$`, "i");
 }
-function hasVoiceTrigger(text) {
-  return /\b(over|ouvre|termin[eé]|termine|terminer|terminée|terminee)\b/i.test(text);
+
+const TRIGGER_END_RE = buildTriggerEndRegex();
+
+function hasVoiceTriggerAtEnd(text) {
+  const t = cleanStr(text);
+  if (!t) return false;
+  return TRIGGER_END_RE.test(t);
+}
+
+function stripVoiceTriggerAtEnd(text) {
+  const t = cleanStr(text);
+  if (!t) return "";
+  return cleanStr(t.replace(TRIGGER_END_RE, ""));
 }
 
 // form submit
@@ -470,8 +503,7 @@ socket.on("systemMessage", (msg) => {
 });
 
 socket.on("presenceUpdate", (payload) => {
-  // optional in this minimal client: ignore if you want
-  // (tu peux remplir usersList/usersCount ici si tu le souhaites)
+  // optionnel: tu peux remplir usersList/usersCount ici
 });
 
 socket.on("projectsUpdate", (payload) => {
@@ -794,19 +826,23 @@ async function startListening() {
         else interim += txt + " ";
       }
 
-      const combined = cleanStr(final || interim);
-      if (!combined) return;
+      const combinedRaw = cleanStr(final || interim);
+      if (!combinedRaw) return;
 
-      if (voiceHint) voiceHint.textContent = `🗣️ ${combined.slice(0, 80)}${combined.length > 80 ? "…" : ""}`;
+      // ✅ Preview sans trigger en fin (si présent)
+      const combinedPreview = stripVoiceTriggerAtEnd(combinedRaw);
+      if (voiceHint) voiceHint.textContent = `🗣️ ${combinedPreview.slice(0, 80)}${combinedPreview.length > 80 ? "…" : ""}`;
 
+      // ✅ Append to input: JAMAIS de trigger ajouté
       if (VOICE_APPEND_TO_INPUT) {
         const cur = cleanStr(input.value);
-        const add = stripVoiceTrigger(combined);
+        const add = stripVoiceTriggerAtEnd(combinedRaw);
         if (add) input.value = cur ? `${cur} ${add}` : add;
       }
 
-      if (VOICE_SEND_ON_OVER && hasVoiceTrigger(combined)) {
-        const msg = cleanStr(stripVoiceTrigger(combined) || input.value);
+      // ✅ Envoi si trigger en fin (et envoi sans trigger)
+      if (VOICE_SEND_ON_OVER && hasVoiceTriggerAtEnd(combinedRaw)) {
+        const msg = cleanStr(stripVoiceTriggerAtEnd(combinedRaw) || stripVoiceTriggerAtEnd(input.value));
         if (msg) {
           sendTextMessage(msg);
           input.value = "";
@@ -818,7 +854,7 @@ async function startListening() {
 
     isListening = true;
     setVoiceButtonState();
-    if (voiceHint) voiceHint.textContent = `🎧 Écoute (SpeechRecognition) : dis "${VOICE_OVER_WORD}" (ou "ouvre"/"terminé") pour envoyer.`;
+    if (voiceHint) voiceHint.textContent = `🎧 Écoute (SpeechRecognition) : dis "${VOICE_OVER_WORD}" (ou "ouvre"/"terminé"/"au revoir") pour envoyer.`;
     try { recognition.start(); } catch {}
     return;
   }
@@ -826,7 +862,7 @@ async function startListening() {
   // ✅ Firefox: dictée via segments STOP/START => blob valide => /transcribe
   voiceMode = "segment";
   segAccumulatedText = "";
-  if (voiceHint) voiceHint.textContent = `🎧 Dictée Firefox : parle, puis dis "${VOICE_OVER_WORD}" / "ouvre" / "terminé" pour envoyer.`;
+  if (voiceHint) voiceHint.textContent = `🎧 Dictée Firefox : parle, puis dis "${VOICE_OVER_WORD}" / "ouvre" / "terminé" / "au revoir" pour envoyer.`;
 
   const SEG_MS = 4000;
 
@@ -862,20 +898,23 @@ async function startListening() {
             const text = await transcribeAudioBlob(blob);
             if (!text) return;
 
+            // on accumule brut, puis on affiche/nettoie pour l'UI
             segAccumulatedText = cleanStr((segAccumulatedText + " " + text).slice(-2500));
 
+            const preview = stripVoiceTriggerAtEnd(segAccumulatedText);
             if (voiceHint) {
-              const preview = segAccumulatedText.slice(0, 90);
-              voiceHint.textContent = `🗣️ ${preview}${segAccumulatedText.length > 90 ? "…" : ""}`;
+              const p = preview.slice(0, 90);
+              voiceHint.textContent = `🗣️ ${p}${preview.length > 90 ? "…" : ""}`;
             }
 
+            // ✅ Input = version nettoyée (jamais "over/au revoir")
             if (VOICE_APPEND_TO_INPUT) {
-              const cleaned = stripVoiceTrigger(segAccumulatedText);
-              if (cleaned) input.value = cleaned;
+              if (preview) input.value = preview;
             }
 
-            if (VOICE_SEND_ON_OVER && hasVoiceTrigger(segAccumulatedText)) {
-              const msg = cleanStr(stripVoiceTrigger(segAccumulatedText));
+            // ✅ Envoi si trigger en fin de l'accumulation (et envoi nettoyé)
+            if (VOICE_SEND_ON_OVER && hasVoiceTriggerAtEnd(segAccumulatedText)) {
+              const msg = cleanStr(stripVoiceTriggerAtEnd(segAccumulatedText));
               if (msg) sendTextMessage(msg);
               input.value = "";
               input.focus();
