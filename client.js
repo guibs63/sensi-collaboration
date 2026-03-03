@@ -1,5 +1,8 @@
-// guibs:/client.js (COMPLET) — ULTRA v3.4.5 CLIENT (Railway + socket fallback safe) ✅
+// guibs:/client.js (COMPLET) — ULTRA v3.4.5 CLIENT — Presence FIX ✅
 // VOICE fix: "over / au revoir" = triggers d’envoi, mais JAMAIS ajoutés au texte final.
+// Patch v3.4.5a (minimal):
+// - joinProject(): set currentProject/currentUsername AVANT renderPresence([])
+// - joinProject(): garde-fou si socket pas prêt
 "use strict";
 
 /* ======================================================
@@ -69,7 +72,6 @@ function ensureSocketStatusSlot() {
   if (!statusText) return null;
   if (socketStatusSpan) return socketStatusSpan;
 
-  // Si l’index a déjà mis du HTML (OK | version | AI...), on ajoute à la fin.
   socketStatusSpan = document.createElement("span");
   socketStatusSpan.id = "socket-status";
   socketStatusSpan.style.marginLeft = "10px";
@@ -222,7 +224,6 @@ function addMessage({ id, ts, username, userId, message, attachment }) {
   row.className = "msg msg-row";
   if (Number.isFinite(mid)) row.dataset.mid = String(mid);
 
-  // Bouton delete uniquement pour MES messages
   const canDelete = cleanStr(userId) && cleanStr(userId) === cleanStr(myUserId);
 
   row.innerHTML = `
@@ -276,7 +277,6 @@ chat.addEventListener("click", (e) => {
       alert("Suppression impossible: " + (resp?.error || "unknown"));
       return;
     }
-    // le serveur broadcast aussi messageDeleted, mais on peut retirer tout de suite
     removeMessageNode(mid);
   });
 });
@@ -309,7 +309,7 @@ function setProjectsOptions(projects, keepSelection = true) {
 }
 
 /* ======================================================
-   Presence rendering
+   Presence rendering (tolerant)
    ====================================================== */
 
 function renderPresence(users) {
@@ -321,8 +321,9 @@ function renderPresence(users) {
   usersList.innerHTML = "";
   for (const u of arr) {
     const li = document.createElement("li");
-    const name = cleanStr(u?.username) || "—";
-    const uid = cleanStr(u?.userId);
+
+    const name = cleanStr(u?.username || u?.name || u?.user || u?.displayName) || "—";
+    const uid = cleanStr(u?.userId || u?.id || "");
 
     li.innerHTML = `
       <span>${escapeHtml(name)}</span>
@@ -369,7 +370,7 @@ function sendTextMessage(text) {
 }
 
 /* ======================================================
-   VOICE / AUDIO / FFT (your logic preserved, minor safety)
+   VOICE / AUDIO / FFT (logic preserved)
    ====================================================== */
 
 const ENABLE_VOICE = true;
@@ -745,7 +746,7 @@ async function startListening() {
     return;
   }
 
-  // Firefox segment mode -> /transcribe
+  // Firefox segment mode -> /transcribe (nécessite endpoint côté serveur)
   voiceMode = "segment";
   segAccumulatedText = "";
   if (voiceHint) voiceHint.textContent = `🎧 Dictée Firefox : parle, puis dis "${VOICE_OVER_WORD}" / "ouvre" / "terminé" / "au revoir" pour envoyer.`;
@@ -962,15 +963,24 @@ function joinProject() {
   if (!username) return alert("Entre un pseudo 🙂");
   if (!project) return alert("Aucun projet disponible.");
 
+  if (!socket) return alert("Socket non prêt (chargement en cours).");
+  if (!socket.connected) addSystem("⏳ Socket pas encore connecté… on tente quand même.");
+
   currentUsername = username;
   currentProject = project;
   saveLastSession();
+
+  // ✅ reset presence UI AFTER setting currentProject/currentUsername
+  renderPresence([]);
 
   setProjectLabel(currentProject);
   clearChat();
   addSystem(`Connexion au projet "${currentProject}"...`);
 
   socket.emit("joinProject", { username: currentUsername, project: currentProject, userId: myUserId });
+
+  // ping (optionnel)
+  socket.emit("getProjects");
 
   updateVoiceUiGate();
 }
@@ -1182,7 +1192,7 @@ async function initSocket() {
 })();
 
 /* ======================================================
-   CLEANUP
+   CLEANUP (optional leaveProject)
    ====================================================== */
 
 window.addEventListener("beforeunload", () => {
@@ -1190,6 +1200,10 @@ window.addEventListener("beforeunload", () => {
   try { stopRecording(); } catch {}
   try { if (mediaStream) mediaStream.getTracks().forEach((t) => t.stop()); } catch {}
   try { if (audioCtx && audioCtx.state !== "closed") audioCtx.close(); } catch {}
+
+  try {
+    if (socket && currentProject) socket.emit("leaveProject");
+  } catch {}
 });
 
 /* ======================================================

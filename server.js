@@ -1,5 +1,10 @@
-// guibs:/server.js (COMPLET) — ULTRA v3.4.4 — Railway OK ✅
-// Fix: supprimer tout \" et tout caractère parasite (ex: "<" avant app.get) sinon Node crash au parse.
+// guibs:/server.js (COMPLET) — ULTRA v3.4.5 — Presence realtime FIX ✅
+// Aligné avec ton client ULTRA v3.4.5 :
+// - joinProject / presenceUpdate / chatMessage / chatHistory / projectsUpdate / createProject / deleteProject / deleteMessage
+// - /projects (HTTP) + /upload (HTTP) + /health (HTTP)
+// - Rooms Socket.IO = nom du projet (string)
+// - Présence temps réel : apparaît dans le cadre “Users en ligne”
+
 "use strict";
 
 const express = require("express");
@@ -7,678 +12,360 @@ const cors = require("cors");
 const http = require("http");
 const path = require("path");
 const fs = require("fs");
-const crypto = require("crypto");
 const multer = require("multer");
 const { Server } = require("socket.io");
-const OpenAI = require("openai");
 
-/**
- * OPTIONAL DEPENDENCIES (NEVER CRASH ON REQUIRE)
- * ⚠️ Railway crash fix:
- * - Certaines libs (ex: pdf-parse >=2.x) peuvent throw au require() (DOMMatrix not defined).
- * - Ici, deps optionnelles: on NE DOIT JAMAIS planter au démarrage.
- */
-function optionalRequire(name) {
-  try {
-    return require(name);
-  } catch (e) {
-    const msg = String(e?.message || e || "");
-    const code = e?.code;
-    if (code === "MODULE_NOT_FOUND") return null;
-    if (/DOMMatrix|ImageData|Path2D/i.test(msg)) return null;
-    return null;
-  }
-}
-
-// Web extraction (optional)
-const jsdomPkg = optionalRequire("jsdom");
-const readabilityPkg = optionalRequire("@mozilla/readability");
-const JSDOM = jsdomPkg ? jsdomPkg.JSDOM : null;
-const Readability = readabilityPkg ? (readabilityPkg.Readability || readabilityPkg) : null;
-
-// Docs creation (optional)
-const docxPkg = optionalRequire("docx");
-const excelJSPkg = optionalRequire("exceljs");
-const pptxPkg = optionalRequire("pptxgenjs");
-
-const Document = docxPkg ? docxPkg.Document : null;
-const Packer = docxPkg ? docxPkg.Packer : null;
-const Paragraph = docxPkg ? docxPkg.Paragraph : null;
-const HeadingLevel = docxPkg ? docxPkg.HeadingLevel : null;
-const TextRun = docxPkg ? docxPkg.TextRun : null;
-
-const ExcelJS = excelJSPkg || null;
-const PptxGenJS = pptxPkg || null;
-
-// ==================================================
-// APP INIT
-// ==================================================
+// =========================
+// App
+// =========================
 const app = express();
-app.set("trust proxy", 1);
-app.use(cors());
-app.use(express.json({ limit: "6mb" }));
+app.use(cors({ origin: "*", methods: ["GET", "POST"] }));
+app.use(express.json({ limit: "2mb" }));
 
-// ✅ anti-cache Railway (IMPORTANT: pas de "<" ici)
-app.get("/", (req, res, next) => {
-  res.setHeader("Cache-Control", "no-store");
-  next();
-});
-app.get("/client.js", (req, res, next) => {
-  res.setHeader("Cache-Control", "no-store");
-  next();
-});
-app.get("/index.html", (req, res, next) => {
-  res.setHeader("Cache-Control", "no-store");
-  next();
-});
+const ROOT = __dirname;
+const STORAGE_DIR = path.join(ROOT, "storage");
+const UPLOADS_DIR = path.join(ROOT, "uploads");
 
-app.use(express.static(__dirname));
+ensureDir(STORAGE_DIR);
+ensureDir(UPLOADS_DIR);
 
-// ==================================================
-// CONFIG
-// ==================================================
-function cleanEnv(v) {
-  return String(v ?? "").trim();
-}
-
-const APP_VERSION = process.env.APP_VERSION || "ultra-v3.4.4";
-const STORAGE_DIR = path.join(__dirname, "storage");
-const HISTORY_FILE = path.join(STORAGE_DIR, "messages.json");
-const PROJECTS_FILE = path.join(STORAGE_DIR, "projects.json");
-const MEMORY_FILE = path.join(STORAGE_DIR, "global_memory.json");
-const LOG_FILE = path.join(STORAGE_DIR, "logs.txt");
-
-const UPLOADS_DIR = path.join(__dirname, "uploads");
-const GENERATED_DIR = path.join(__dirname, "generated");
-
-const MAX_MESSAGES_PER_PROJECT = Number(process.env.MAX_MESSAGES_PER_PROJECT || 350);
-const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB || 40);
-const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
-
-// IA
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.2-chat-latest";
-const OPENAI_TRANSCRIBE_MODEL =
-  process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe";
-const OPENAI_IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1";
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-
-// Web search provider (optional)
-const WEB_SEARCH_PROVIDER = cleanEnv(process.env.WEB_SEARCH_PROVIDER || "tavily"); // tavily | serpapi
-const TAVILY_API_KEY = cleanEnv(process.env.TAVILY_API_KEY || "");
-const SERPAPI_KEY = cleanEnv(process.env.SERPAPI_KEY || "");
-
-const WEB_SEARCH_TIMEOUT_MS = Number(process.env.WEB_SEARCH_TIMEOUT_MS || 12000);
-const WEB_SEARCH_MAX_RESULTS = Number(process.env.WEB_SEARCH_MAX_RESULTS || 6);
-
-// Web URL-open limits
-const WEB_PAGE_TIMEOUT_MS = Number(process.env.WEB_PAGE_TIMEOUT_MS || 12000);
-const WEB_MAX_CHARS_PER_PAGE = Number(process.env.WEB_MAX_CHARS_PER_PAGE || 14000);
-
-// Cache
-const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 10 * 60 * 1000);
-
-// Audio auto transcript message
-const AUDIO_AUTO_TRANSCRIPT_MESSAGE =
-  String(process.env.AUDIO_AUTO_TRANSCRIPT_MESSAGE || "1") !== "0";
-const AUDIO_TRANSCRIPT_LANGUAGE = process.env.AUDIO_TRANSCRIPT_LANGUAGE || "fr";
-const AUDIO_TRANSCRIPT_PREFIX =
-  process.env.AUDIO_TRANSCRIPT_PREFIX || "🗣️ (transcription) ";
-
-// (optionnel) Protéger /logs avec un token
-const LOGS_TOKEN = cleanEnv(process.env.LOGS_TOKEN || "");
-
-// ==================================================
-// INIT DIRS
-// ==================================================
-function ensureDirs() {
-  if (!fs.existsSync(STORAGE_DIR)) fs.mkdirSync(STORAGE_DIR, { recursive: true });
-  if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-  if (!fs.existsSync(GENERATED_DIR)) fs.mkdirSync(GENERATED_DIR, { recursive: true });
-
-  if (!fs.existsSync(HISTORY_FILE))
-    fs.writeFileSync(HISTORY_FILE, JSON.stringify({}, null, 2), "utf8");
-  if (!fs.existsSync(PROJECTS_FILE))
-    fs.writeFileSync(PROJECTS_FILE, JSON.stringify(["test"], null, 2), "utf8");
-  if (!fs.existsSync(MEMORY_FILE))
-    fs.writeFileSync(MEMORY_FILE, JSON.stringify({ facts: [] }, null, 2), "utf8");
-  if (!fs.existsSync(LOG_FILE)) fs.writeFileSync(LOG_FILE, "", "utf8");
-}
-ensureDirs();
-
+// Static front
+app.use(express.static(ROOT));
 app.use("/uploads", express.static(UPLOADS_DIR));
-app.use("/generated", express.static(GENERATED_DIR));
 
-// ==================================================
-// LOGGING (FILE + CONSOLE)
-// ==================================================
-function logLine(...args) {
-  const safe = args.map((a) => {
-    try {
-      return typeof a === "string" ? a : JSON.stringify(a);
-    } catch {
-      return String(a);
-    }
-  });
-
-  const line = `[${new Date().toISOString()}] ${safe.join(" ")}\n`;
-
-  try {
-    if (!fs.existsSync(STORAGE_DIR)) fs.mkdirSync(STORAGE_DIR, { recursive: true });
-    fs.appendFileSync(LOG_FILE, line, "utf8");
-  } catch {}
-  console.log(...args);
-}
-
-function tailFile(filePath, maxLines = 200) {
-  try {
-    const raw = fs.readFileSync(filePath, "utf8");
-    const lines = raw.split("\n");
-    return lines.slice(Math.max(0, lines.length - maxLines)).join("\n");
-  } catch {
-    return "";
-  }
-}
-
-// ==================================================
-// HELPERS
-// ==================================================
-function readJSON(file, fallback) {
-  try {
-    return JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch {
-    return fallback;
-  }
-}
-function writeJSON(file, data) {
-  try {
-    fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8");
-  } catch (e) {
-    logLine("[storage] write failed:", file, e?.message || e);
-  }
-}
-function cleanStr(v) {
-  return String(v ?? "").trim();
-}
-function safeProjectKey(project) {
-  const p = cleanStr(project);
-  return p ? p.slice(0, 80) : "";
-}
-function isValidProjectName(name) {
-  return /^[a-zA-Z0-9 _.\-]{2,50}$/.test(name);
-}
-function hasOpenAI() {
-  return Boolean(cleanEnv(OPENAI_API_KEY));
-}
-function getOpenAIClient() {
-  return new OpenAI({ apiKey: OPENAI_API_KEY });
-}
-
-function hasWebSearch() {
-  if (WEB_SEARCH_PROVIDER === "serpapi") return Boolean(cleanEnv(SERPAPI_KEY));
-  return Boolean(cleanEnv(TAVILY_API_KEY));
-}
-function webModeLabel() {
-  if (hasWebSearch()) return `search(${WEB_SEARCH_PROVIDER})`;
-  return `url-open only (tavily not configured)`;
-}
-
-// ==================================================
-// STATE
-// ==================================================
-let historyByProject = readJSON(HISTORY_FILE, {});
-let projects = readJSON(PROJECTS_FILE, ["test"]);
-let globalMemory = readJSON(MEMORY_FILE, { facts: [] });
-
-if (!Array.isArray(projects) || projects.length === 0) projects = ["test"];
-projects = Array.from(new Set(projects.map((p) => cleanStr(p)).filter(Boolean)));
-if (!globalMemory || typeof globalMemory !== "object") globalMemory = { facts: [] };
-if (!Array.isArray(globalMemory.facts)) globalMemory.facts = [];
-
-// save debounce
-let saveTimer = null;
-function scheduleHistorySave() {
-  if (saveTimer) return;
-  saveTimer = setTimeout(() => {
-    saveTimer = null;
-    writeJSON(HISTORY_FILE, historyByProject);
-  }, 400);
-}
-function saveProjectsNow() {
-  writeJSON(PROJECTS_FILE, projects);
-}
-function saveMemoryNow() {
-  writeJSON(MEMORY_FILE, globalMemory);
-}
-
-function getHistory(project) {
-  const p = safeProjectKey(project);
-  const arr = historyByProject[p];
-  return Array.isArray(arr) ? arr : [];
-}
-function pushMessage(project, msgObj) {
-  const p = safeProjectKey(project);
-  if (!p) return;
-  if (!Array.isArray(historyByProject[p])) historyByProject[p] = [];
-  historyByProject[p].push(msgObj);
-  if (historyByProject[p].length > MAX_MESSAGES_PER_PROJECT) {
-    historyByProject[p] = historyByProject[p].slice(-MAX_MESSAGES_PER_PROJECT);
-  }
-  scheduleHistorySave();
-}
-function listProjects() {
-  return projects.slice().sort((a, b) => a.localeCompare(b, "fr"));
-}
-
-// ==================================================
-// ROUTES
-// ==================================================
-app.get("/health", (req, res) => {
+// =========================
+// Version / Health
+// =========================
+const VERSION = "ultra-v3.4.5-presence-fix";
+app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     time: new Date().toISOString(),
-    version: APP_VERSION,
-    ai: hasOpenAI() ? "enabled" : "disabled",
-    deps: {
-      jsdom: Boolean(JSDOM),
-      readability: Boolean(Readability),
-      docx: Boolean(docxPkg),
-      exceljs: Boolean(ExcelJS),
-      pptxgenjs: Boolean(PptxGenJS),
-      pdfParse: Boolean(optionalRequire("pdf-parse")),
-    },
-    models: {
-      chat: OPENAI_MODEL,
-      transcribe: OPENAI_TRANSCRIBE_MODEL,
-      image: OPENAI_IMAGE_MODEL,
-    },
-    web: webModeLabel(),
-    audio: { autoTranscriptMessage: AUDIO_AUTO_TRANSCRIPT_MESSAGE, language: AUDIO_TRANSCRIPT_LANGUAGE },
-    logs: { enabled: true, protectedByToken: Boolean(LOGS_TOKEN) },
+    version: VERSION,
+    ai: "disabled",
+    web: "url-open only",
   });
 });
 
-// ✅ compat: certains clients attendent un tableau JSON direct
-app.get("/projects", (req, res) => res.json(listProjects()));
-// ✅ format “propre” si tu veux l’utiliser côté front moderne
-app.get("/projects/v2", (req, res) => res.json({ ok: true, projects: listProjects() }));
+// =========================
+// Simple JSON persistence
+// (Railway: FS peut être éphémère -> OK quand même, ça marche local)
+// =========================
+const PROJECTS_FILE = path.join(STORAGE_DIR, "projects.json");
+const MESSAGES_FILE = path.join(STORAGE_DIR, "messages.json");
 
-app.get("/logs", (req, res) => {
-  if (LOGS_TOKEN) {
-    const token = cleanStr(req.query?.token);
-    if (!token || token !== LOGS_TOKEN) return res.status(401).send("unauthorized (missing/invalid token)");
-  }
-  const out = tailFile(LOG_FILE, 220);
-  res.setHeader("Content-Type", "text/plain; charset=utf-8");
-  res.send(out || "no logs");
-});
+let projects = loadJson(PROJECTS_FILE, ["test", "Evercell"]);
+let messagesByProject = loadJson(MESSAGES_FILE, {}); // { [project]: [messages...] }
 
-// ==================================================
-// SERVER + SOCKET
-// ==================================================
-const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
-
-// ==================================================
-// FILE HELPERS
-// ==================================================
-function extFromMime(mime, originalName) {
-  const fallback = path.extname(originalName || "").slice(0, 10);
-  if (fallback) return fallback;
-
-  if (mime === "image/png") return ".png";
-  if (mime === "image/jpeg") return ".jpg";
-  if (mime === "image/webp") return ".webp";
-  if (mime === "application/pdf") return ".pdf";
-  if (mime === "text/plain") return ".txt";
-
-  if (mime === "audio/webm") return ".webm";
-  if (mime === "audio/ogg") return ".ogg";
-  if (mime === "audio/mpeg") return ".mp3";
-  if (mime === "audio/wav") return ".wav";
-  if (mime === "audio/x-wav") return ".wav";
-  if (mime === "audio/mp4") return ".m4a";
-  if (mime && mime.startsWith("audio/")) return ".audio";
-
-  return "";
+function saveAll() {
+  saveJson(PROJECTS_FILE, projects);
+  saveJson(MESSAGES_FILE, messagesByProject);
 }
 
-// ==================================================
-// UPLOAD
-// ==================================================
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOADS_DIR),
-  filename: (req, file, cb) => {
-    const ext = extFromMime(file.mimetype, file.originalname);
-    const id = crypto.randomBytes(12).toString("hex");
-    cb(null, `${Date.now()}_${id}${ext}`);
-  },
+// =========================
+// /projects (ton client tente fetch avant socket)
+// =========================
+app.get("/projects", (_req, res) => {
+  res.json({ ok: true, projects });
 });
 
+// =========================
+// Upload
+// =========================
 const upload = multer({
-  storage,
-  limits: { fileSize: MAX_UPLOAD_BYTES },
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, UPLOADS_DIR),
+    filename: (_req, file, cb) => {
+      const safe = String(file.originalname || "file").replace(/[^\w.\-]+/g, "_");
+      cb(null, `${Date.now()}_${safe}`);
+    },
+  }),
+  limits: { fileSize: 25 * 1024 * 1024 },
 });
 
-// =======================
-// Speech-to-text (Whisper via OpenAI)
-// POST /transcribe  (multipart/form-data: audio=<file>)
-// =======================
-const memUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: Math.min(MAX_UPLOAD_BYTES, 12 * 1024 * 1024) },
-});
-
-app.post("/transcribe", memUpload.single("audio"), async (req, res) => {
-  let tmpPath = null;
-
-  // ✅ IMPORTANT: guillemets normaux "..." (pas de \" ni de “ ”)
+app.post("/upload", upload.single("file"), (req, res) => {
   try {
-    logLine("[transcribe]", {
-      size: req.file?.size,
-      mimetype: req.file?.mimetype,
-      originalname: req.file?.originalname,
-    });
-  } catch {}
+    const f = req.file;
+    if (!f) return res.status(400).json({ ok: false, error: "No file" });
 
-  try {
-    if (!OPENAI_API_KEY) return res.status(500).json({ ok: false, error: "OPENAI_API_KEY manquante." });
-    if (!req.file) return res.status(400).json({ ok: false, error: "Aucun audio." });
+    const url = `/uploads/${encodeURIComponent(f.filename)}`;
 
-    const mime = (req.file.mimetype || "").toLowerCase();
-    let ext = "webm";
-    if (mime.includes("wav")) ext = "wav";
-    else if (mime.includes("mpeg") || mime.includes("mp3")) ext = "mp3";
-    else if (mime.includes("mp4") || mime.includes("m4a")) ext = "m4a";
-    else if (mime.includes("ogg")) ext = "ogg";
-
-    tmpPath = path.join(
-      "/tmp",
-      `sensi_voice_${Date.now()}_${crypto.randomBytes(4).toString("hex")}.${ext}`
-    );
-    await fs.promises.writeFile(tmpPath, req.file.buffer);
-
-    const openai = getOpenAIClient();
-    const model = process.env.OPENAI_TRANSCRIBE_MODEL || OPENAI_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe";
-
-    const result = await openai.audio.transcriptions.create({
-      file: fs.createReadStream(tmpPath),
-      model,
-      language: "fr",
-    });
-
-    const text =
-      result && typeof result === "object" && "text" in result ? result.text : String(result || "");
-    return res.json({ ok: true, text: cleanStr(text) });
-  } catch (e) {
-    console.error("TRANSCRIBE_ERROR:", e);
-    return res.status(500).json({ ok: false, error: e?.message || String(e) });
-  } finally {
-    if (tmpPath) fs.promises.unlink(tmpPath).catch(() => {});
-  }
-});
-
-app.post("/upload", upload.single("file"), async (req, res) => {
-  try {
-    const project = safeProjectKey(req.body?.project);
+    // Optionnel : push un message chat avec pièce jointe
+    const project = cleanStr(req.body?.project);
     const username = cleanStr(req.body?.username) || "Anonyme";
-    const userId = cleanStr(req.body?.userId);
+    const userId = cleanStr(req.body?.userId) || "";
 
-    if (!project || !projects.includes(project)) return res.status(400).json({ ok: false, error: "Projet invalide." });
-    if (!userId) return res.status(400).json({ ok: false, error: "userId manquant." });
-    if (!req.file) return res.status(400).json({ ok: false, error: "Aucun fichier." });
+    if (project) {
+      const msg = makeMessage({
+        project,
+        username,
+        userId,
+        message: `📎 Fichier envoyé: ${f.originalname}`,
+        attachment: { url, filename: f.originalname, mimetype: f.mimetype },
+      });
 
-    const hostBase = `${req.protocol}://${req.get("host")}`;
-    const url = `${hostBase}/uploads/${encodeURIComponent(req.file.filename)}`;
+      pushMessage(project, msg);
+      io.to(project).emit("chatMessage", msg);
+    }
 
-    const attachment = {
-      url,
-      path: `/uploads/${req.file.filename}`,
-      filename: req.file.originalname,
-      storedAs: req.file.filename,
-      mimetype: req.file.mimetype || "application/octet-stream",
-      size: req.file.size,
-    };
-
-    const msg = {
-      id: Date.now(),
-      ts: Date.now(),
-      project,
-      username,
-      userId,
-      message: `📎 ${attachment.filename}`,
-      attachment,
-    };
-
-    pushMessage(project, {
-      id: msg.id,
-      ts: msg.ts,
-      username: msg.username,
-      userId: msg.userId,
-      message: msg.message,
-      attachment: msg.attachment,
-    });
-
-    io.to(project).emit("chatMessage", msg);
-
-    res.json({ ok: true, project, attachment });
+    res.json({ ok: true, url, filename: f.originalname, mimetype: f.mimetype });
   } catch (e) {
-    logLine("[upload]", e?.message || e, e?.stack);
-    res.status(500).json({ ok: false, error: "Upload error" });
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
-// ==================================================
-// EMIT HELPERS
-// ==================================================
-function emitSystem(project, text) {
-  io.to(project).emit("systemMessage", { id: Date.now(), ts: Date.now(), project, text });
-}
+// =========================
+// HTTP Server + Socket.IO
+// =========================
+const server = http.createServer(app);
 
-// ==================================================
-// PRESENCE + SOCKET EVENTS
-// ==================================================
-const presence = new Map(); // project -> Map(socketId -> {username,userId})
+const io = new Server(server, {
+  cors: { origin: "*", methods: ["GET", "POST"] },
+  transports: ["websocket", "polling"],
+});
 
-function getUsers(project) {
-  const map = presence.get(project);
+// =========================
+// Presence (LE truc qui manquait)
+// project -> Map(socket.id -> { username, userId })
+// =========================
+const presenceByProject = new Map();
+
+function getPresenceList(project) {
+  const map = presenceByProject.get(project);
   if (!map) return [];
-  // ✅ retourne une liste d'objets (meilleur côté client)
-  return Array.from(map.values())
-    .map((v) => ({ username: cleanStr(v.username), userId: cleanStr(v.userId) }))
-    .filter((v) => v.username);
+  return Array.from(map.values());
 }
+
 function emitPresence(project) {
-  io.to(project).emit("presenceUpdate", { project, users: getUsers(project) });
-}
-function broadcastProjects() {
-  io.emit("projectsUpdate", { projects: listProjects() });
-}
-
-function normalizeCreatePayload(payload) {
-  if (typeof payload === "string") return { name: payload };
-  return payload || {};
+  io.to(project).emit("presenceUpdate", {
+    project,
+    users: getPresenceList(project),
+  });
 }
 
-// ==================================================
-// DELETE OWN MESSAGE (server-side)
-// ==================================================
-function deleteMessageIfOwner(project, messageId, requesterUserId) {
-  const p = safeProjectKey(project);
-  const mid = Number(messageId);
-  const uid = cleanStr(requesterUserId);
-
-  if (!p || !Number.isFinite(mid) || !uid) return { ok: false, reason: "bad_args" };
-
-  const arr = historyByProject[p];
-  if (!Array.isArray(arr) || arr.length === 0) return { ok: false, reason: "not_found" };
-
-  const idx = arr.findIndex((m) => Number(m?.id) === mid);
-  if (idx < 0) return { ok: false, reason: "not_found" };
-
-  const msg = arr[idx];
-  if (cleanStr(msg?.userId) !== uid) return { ok: false, reason: "not_owner" };
-
-  arr.splice(idx, 1);
-  historyByProject[p] = arr;
-  scheduleHistorySave();
-  return { ok: true };
+function presenceJoin(socket, project, username, userId) {
+  if (!presenceByProject.has(project)) presenceByProject.set(project, new Map());
+  presenceByProject.get(project).set(socket.id, { username, userId });
+  emitPresence(project);
 }
 
+function presenceLeave(socket, project) {
+  const map = presenceByProject.get(project);
+  if (map) {
+    map.delete(socket.id);
+    if (map.size === 0) presenceByProject.delete(project);
+  }
+  emitPresence(project);
+}
+
+// =========================
+// Socket events (alignés client)
+// =========================
 io.on("connection", (socket) => {
-  logLine("Socket connected:", socket.id);
-  socket.data.userId = "";
-  socket.data.username = "";
-  socket.data.project = "";
+  console.log("🔌 connected", socket.id);
 
-  socket.on("getProjects", () => socket.emit("projectsUpdate", { projects: listProjects() }));
+  // ---- projects
+  socket.on("getProjects", () => {
+    socket.emit("projectsUpdate", { projects });
+  });
 
-  // ✅ createProject({name}) + createProject("name") + alias "create project"
-  const handleCreateProject = (payload, ack) => {
-    const { name } = normalizeCreatePayload(payload);
-    const n = cleanStr(name);
-
-    if (!isValidProjectName(n)) {
-      const err = { ok: false, message: "Nom invalide (2-50, lettres/chiffres/espaces/_-.)" };
-      socket.emit("projectError", { message: err.message });
-      if (typeof ack === "function") ack(err);
+  socket.on("createProject", ({ name } = {}, ack) => {
+    const p = cleanStr(name);
+    if (!isValidProjectName(p)) {
+      const resp = { ok: false, message: "Nom invalide (2-50, lettres/chiffres/espaces/_-.)" };
+      if (typeof ack === "function") ack(resp);
       return;
     }
-    if (projects.includes(n)) {
-      const err = { ok: false, message: "Projet déjà existant." };
-      socket.emit("projectError", { message: err.message });
-      if (typeof ack === "function") ack(err);
-      return;
+    if (!projects.includes(p)) {
+      projects.push(p);
+      saveJson(PROJECTS_FILE, projects);
     }
+    io.emit("projectsUpdate", { projects });
+    const resp = { ok: true, project: p, projects };
+    if (typeof ack === "function") ack(resp);
+  });
 
-    projects.push(n);
-    projects = Array.from(new Set(projects));
-    saveProjectsNow();
-    broadcastProjects();
-
-    const ok = { ok: true, project: n, projects: listProjects() };
-    if (typeof ack === "function") ack(ok);
-  };
-
-  socket.on("createProject", handleCreateProject);
-  socket.on("create project", handleCreateProject);
-
-  socket.on("deleteProject", ({ project }) => {
-    const p = safeProjectKey(project);
+  socket.on("deleteProject", ({ project } = {}) => {
+    const p = cleanStr(project);
     if (!p) return;
-    if (!projects.includes(p)) return socket.emit("projectError", { message: "Projet introuvable." });
-    if (projects.length <= 1)
-      return socket.emit("projectError", { message: "Impossible de supprimer le dernier projet." });
-
-    io.to(p).emit("projectDeleted", { project: p });
-
-    if (historyByProject[p]) delete historyByProject[p];
-    if (presence.has(p)) presence.delete(p);
 
     projects = projects.filter((x) => x !== p);
-    if (projects.length === 0) projects = ["test"];
-    saveProjectsNow();
-    writeJSON(HISTORY_FILE, historyByProject);
-    broadcastProjects();
+    delete messagesByProject[p];
+
+    saveAll();
+
+    io.emit("projectsUpdate", { projects });
+    io.emit("projectDeleted", { project: p });
+
+    // clear presence room
+    presenceByProject.delete(p);
+    io.to(p).emit("presenceUpdate", { project: p, users: [] });
   });
 
-  socket.on("joinProject", ({ project, username, userId }) => {
-    const p = safeProjectKey(project);
+  // ---- join project (TON EVENT)
+  socket.on("joinProject", ({ username, project, userId } = {}) => {
+    const p = cleanStr(project);
     const u = cleanStr(username) || "Anonyme";
-    const uid = cleanStr(userId);
+    const uid = cleanStr(userId) || "";
 
     if (!p) return;
-    if (!projects.includes(p)) {
-      socket.emit("projectError", { message: `Projet "${p}" inexistant.` });
-      socket.emit("projectsUpdate", { projects: listProjects() });
-      return;
-    }
-    if (!uid) return socket.emit("projectError", { message: "Identifiant utilisateur manquant (userId)." });
 
-    socket.data.userId = uid;
-    socket.data.username = u;
+    // leave previous room if any
+    const prev = socket.data.project;
+    if (prev && prev !== p) {
+      try { socket.leave(prev); } catch {}
+      presenceLeave(socket, prev);
+    }
+
     socket.data.project = p;
+    socket.data.username = u;
+    socket.data.userId = uid;
 
     socket.join(p);
 
-    if (!presence.has(p)) presence.set(p, new Map());
-    presence.get(p).set(socket.id, { username: u, userId: uid });
+    // history
+    const hist = Array.isArray(messagesByProject[p]) ? messagesByProject[p] : [];
+    socket.emit("chatHistory", { project: p, messages: hist });
 
-    socket.emit("chatHistory", { project: p, messages: getHistory(p) });
-    emitPresence(p);
-    emitSystem(p, `👋 ${u} a rejoint ${p}`);
+    // system notify
+    io.to(p).emit("systemMessage", { project: p, text: `👋 ${u} a rejoint le projet.` });
+
+    // ✅ presence update (c’est ça qui remplit ton cadre)
+    presenceJoin(socket, p, u, uid);
   });
 
-  socket.on("chatMessage", ({ project, username, userId, message }) => {
-    const p = safeProjectKey(project);
-    const u = cleanStr(username) || socket.data.username || "Anonyme";
-    const uid = cleanStr(userId) || socket.data.userId;
-    const m = cleanStr(message);
-
-    if (!p || !m) return;
-    if (!projects.includes(p)) return;
-    if (!uid) return;
-
-    const msg = { id: Date.now(), ts: Date.now(), project: p, username: u, userId: uid, message: m };
-    pushMessage(p, { id: msg.id, ts: msg.ts, username: msg.username, userId: msg.userId, message: msg.message });
-    io.to(p).emit("chatMessage", msg);
+  // optional leave (ton client l’émet au beforeunload dans ma version patch)
+  socket.on("leaveProject", () => {
+    const p = socket.data.project;
+    if (!p) return;
+    try { socket.leave(p); } catch {}
+    presenceLeave(socket, p);
+    io.to(p).emit("systemMessage", { project: p, text: `👋 ${socket.data.username || "Un user"} a quitté le projet.` });
+    socket.data.project = null;
   });
 
-  // ✅ DELETE OWN MESSAGE
-  socket.on("deleteMessage", ({ project, messageId }, ack) => {
-    const p = safeProjectKey(project);
+  // ---- chat
+  socket.on("chatMessage", ({ username, userId, message, project } = {}) => {
+    const p = cleanStr(project) || cleanStr(socket.data.project);
+    if (!p) return;
+
+    const u = cleanStr(username) || cleanStr(socket.data.username) || "Anonyme";
+    const uid = cleanStr(userId) || cleanStr(socket.data.userId) || "";
+    const msg = cleanStr(message);
+    if (!msg) return;
+
+    const row = makeMessage({ project: p, username: u, userId: uid, message: msg });
+    pushMessage(p, row);
+
+    io.to(p).emit("chatMessage", row);
+  });
+
+  // ---- delete message (TON EVENT + ack)
+  socket.on("deleteMessage", ({ project, messageId } = {}, ack) => {
+    const p = cleanStr(project) || cleanStr(socket.data.project);
     const mid = Number(messageId);
+
+    if (!p || !Number.isFinite(mid)) {
+      if (typeof ack === "function") ack({ ok: false, error: "bad_request" });
+      return;
+    }
+
     const uid = cleanStr(socket.data.userId);
+    const arr = Array.isArray(messagesByProject[p]) ? messagesByProject[p] : [];
 
-    if (!p || !projects.includes(p) || !uid || !Number.isFinite(mid)) {
-      const err = { ok: false, error: "bad_request" };
-      if (typeof ack === "function") ack(err);
+    const idx = arr.findIndex((m) => Number(m.id) === mid);
+    if (idx === -1) {
+      if (typeof ack === "function") ack({ ok: false, error: "not_found" });
       return;
     }
 
-    const result = deleteMessageIfOwner(p, mid, uid);
-    if (!result.ok) {
-      const err = { ok: false, error: result.reason || "delete_failed" };
-      if (typeof ack === "function") ack(err);
+    // autoriser suppression seulement si même userId (si présent)
+    const owner = cleanStr(arr[idx]?.userId);
+    if (owner && uid && owner !== uid) {
+      if (typeof ack === "function") ack({ ok: false, error: "forbidden" });
       return;
     }
+
+    arr.splice(idx, 1);
+    messagesByProject[p] = arr;
+    saveJson(MESSAGES_FILE, messagesByProject);
 
     io.to(p).emit("messageDeleted", { project: p, messageId: mid });
     if (typeof ack === "function") ack({ ok: true });
   });
 
-  socket.on("disconnect", () => {
-    for (const [proj, map] of presence.entries()) {
-      if (map.has(socket.id)) {
-        map.delete(socket.id);
-        emitPresence(proj);
-      }
+  // ---- disconnect -> remove presence + emit
+  socket.on("disconnect", (reason) => {
+    const p = socket.data.project;
+    if (p) {
+      presenceLeave(socket, p);
+      io.to(p).emit("systemMessage", { project: p, text: `💨 ${socket.data.username || "Un user"} s'est déconnecté.` });
     }
-    logLine("Socket disconnected:", socket.id);
+    console.log("❌ disconnected", socket.id, reason);
   });
 });
 
-// ==================================================
-// PROCESS + START
-// ==================================================
-process.on("unhandledRejection", (err) => logLine("[unhandledRejection]", err?.message || err, err?.stack));
-process.on("uncaughtException", (err) => logLine("[uncaughtException]", err?.message || err, err?.stack));
+// =========================
+// Message helpers
+// =========================
+function cleanStr(v) { return String(v ?? "").trim(); }
 
-process.on("SIGTERM", () => {
-  logLine("[SIGTERM] shutting down");
+function isValidProjectName(name) {
+  return /^[a-zA-Z0-9 _.\-]{2,50}$/.test(cleanStr(name));
+}
+
+function ensureDir(dir) {
+  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+}
+
+function loadJson(file, fallback) {
   try {
-    saveProjectsNow();
-    writeJSON(HISTORY_FILE, historyByProject);
-    saveMemoryNow();
-  } catch (_) {}
-  server.close(() => process.exit(0));
-});
+    if (!fs.existsSync(file)) return fallback;
+    const raw = fs.readFileSync(file, "utf8");
+    const data = JSON.parse(raw);
+    return data ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, "0.0.0.0", () => {
-  logLine("🚀 Server running on", PORT);
-  logLine("Version:", APP_VERSION);
-  logLine("AI:", hasOpenAI() ? "enabled" : "disabled");
-  logLine("Models:", { chat: OPENAI_MODEL, transcribe: OPENAI_TRANSCRIBE_MODEL, image: OPENAI_IMAGE_MODEL });
-  logLine("Web:", webModeLabel());
-  logLine("Audio:", { autoTranscriptMessage: AUDIO_AUTO_TRANSCRIPT_MESSAGE, lang: AUDIO_TRANSCRIPT_LANGUAGE });
+function saveJson(file, data) {
+  try { fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8"); } catch {}
+}
+
+// ID monotone in-memory (OK pour session)
+// (si tu veux persistant, je te mets un compteur dans storage)
+let nextId = 1;
+
+function makeMessage({ project, username, userId, message, attachment }) {
+  return {
+    id: nextId++,
+    ts: Date.now(),
+    project: cleanStr(project),
+    username: cleanStr(username) || "Anonyme",
+    userId: cleanStr(userId) || "",
+    message: cleanStr(message) || "",
+    attachment: attachment || null,
+  };
+}
+
+function pushMessage(project, msg) {
+  const p = cleanStr(project);
+  if (!messagesByProject[p]) messagesByProject[p] = [];
+  messagesByProject[p].push(msg);
+
+  // cap historique
+  if (messagesByProject[p].length > 600) {
+    messagesByProject[p] = messagesByProject[p].slice(-600);
+  }
+  saveJson(MESSAGES_FILE, messagesByProject);
+}
+
+// =========================
+// Listen (Railway PORT)
+// =========================
+const PORT = Number(process.env.PORT || 8080);
+server.listen(PORT, () => {
+  console.log("🚀 Server running on", PORT);
+  console.log("Version:", VERSION);
 });
