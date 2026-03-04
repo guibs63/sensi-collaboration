@@ -1,9 +1,9 @@
-// guibs:/server.js (COMPLET) — ULTRA v3.4.5 — Presence realtime FIX ✅
-// Aligné avec ton client ULTRA v3.4.5 :
+// guibs:/server.js (COMPLET) — ULTRA v3.4.6 — Root/SPA fallback + hardening ✅
+// Aligné client ULTRA v3.4.5 :
 // - joinProject / presenceUpdate / chatMessage / chatHistory / projectsUpdate / createProject / deleteProject / deleteMessage
 // - /projects (HTTP) + /upload (HTTP) + /health (HTTP)
 // - Rooms Socket.IO = nom du projet (string)
-// - Présence temps réel : apparaît dans le cadre “Users en ligne”
+// - Présence temps réel
 
 "use strict";
 
@@ -19,24 +19,36 @@ const { Server } = require("socket.io");
 // App
 // =========================
 const app = express();
+
+// Trust proxy (Railway / reverse proxy) — utile pour IP/https
+app.set("trust proxy", 1);
+
+// CORS large (comme toi)
 app.use(cors({ origin: "*", methods: ["GET", "POST"] }));
 app.use(express.json({ limit: "2mb" }));
 
+// Small hardening / debug friendly
+app.disable("x-powered-by");
+
+// =========================
+// Paths & storage
+// =========================
 const ROOT = __dirname;
 const STORAGE_DIR = path.join(ROOT, "storage");
 const UPLOADS_DIR = path.join(ROOT, "uploads");
+const INDEX_HTML = path.join(ROOT, "index.html");
 
 ensureDir(STORAGE_DIR);
 ensureDir(UPLOADS_DIR);
 
-// Static front
-app.use(express.static(ROOT));
-app.use("/uploads", express.static(UPLOADS_DIR));
+// Static front + uploads
+app.use("/uploads", express.static(UPLOADS_DIR, { fallthrough: true }));
+app.use(express.static(ROOT, { fallthrough: true }));
 
 // =========================
 // Version / Health
 // =========================
-const VERSION = "ultra-v3.4.5-presence-fix";
+const VERSION = "ultra-v3.4.6-root-fix";
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
@@ -49,7 +61,6 @@ app.get("/health", (_req, res) => {
 
 // =========================
 // Simple JSON persistence
-// (Railway: FS peut être éphémère -> OK quand même, ça marche local)
 // =========================
 const PROJECTS_FILE = path.join(STORAGE_DIR, "projects.json");
 const MESSAGES_FILE = path.join(STORAGE_DIR, "messages.json");
@@ -63,7 +74,7 @@ function saveAll() {
 }
 
 // =========================
-// /projects (ton client tente fetch avant socket)
+// /projects (client fetch avant socket)
 // =========================
 app.get("/projects", (_req, res) => {
   res.json({ ok: true, projects });
@@ -115,6 +126,19 @@ app.post("/upload", upload.single("file"), (req, res) => {
 });
 
 // =========================
+// ✅ Root route explicite
+// (évite le flou du static si index.html pas trouvé)
+// =========================
+app.get("/", (_req, res) => {
+  if (fs.existsSync(INDEX_HTML)) {
+    // no-cache en dev pour éviter contenus “fantômes”
+    res.setHeader("Cache-Control", "no-store");
+    return res.sendFile(INDEX_HTML);
+  }
+  return res.status(200).send("OK (no index.html in build)");
+});
+
+// =========================
 // HTTP Server + Socket.IO
 // =========================
 const server = http.createServer(app);
@@ -125,7 +149,7 @@ const io = new Server(server, {
 });
 
 // =========================
-// Presence (LE truc qui manquait)
+// Presence
 // project -> Map(socket.id -> { username, userId })
 // =========================
 const presenceByProject = new Map();
@@ -164,7 +188,6 @@ function presenceLeave(socket, project) {
 io.on("connection", (socket) => {
   console.log("🔌 connected", socket.id);
 
-  // ---- projects
   socket.on("getProjects", () => {
     socket.emit("projectsUpdate", { projects });
   });
@@ -202,7 +225,6 @@ io.on("connection", (socket) => {
     io.to(p).emit("presenceUpdate", { project: p, users: [] });
   });
 
-  // ---- join project (TON EVENT)
   socket.on("joinProject", ({ username, project, userId } = {}) => {
     const p = cleanStr(project);
     const u = cleanStr(username) || "Anonyme";
@@ -210,7 +232,6 @@ io.on("connection", (socket) => {
 
     if (!p) return;
 
-    // leave previous room if any
     const prev = socket.data.project;
     if (prev && prev !== p) {
       try { socket.leave(prev); } catch {}
@@ -223,18 +244,14 @@ io.on("connection", (socket) => {
 
     socket.join(p);
 
-    // history
     const hist = Array.isArray(messagesByProject[p]) ? messagesByProject[p] : [];
     socket.emit("chatHistory", { project: p, messages: hist });
 
-    // system notify
     io.to(p).emit("systemMessage", { project: p, text: `👋 ${u} a rejoint le projet.` });
 
-    // ✅ presence update (c’est ça qui remplit ton cadre)
     presenceJoin(socket, p, u, uid);
   });
 
-  // optional leave (ton client l’émet au beforeunload dans ma version patch)
   socket.on("leaveProject", () => {
     const p = socket.data.project;
     if (!p) return;
@@ -244,7 +261,6 @@ io.on("connection", (socket) => {
     socket.data.project = null;
   });
 
-  // ---- chat
   socket.on("chatMessage", ({ username, userId, message, project } = {}) => {
     const p = cleanStr(project) || cleanStr(socket.data.project);
     if (!p) return;
@@ -260,7 +276,6 @@ io.on("connection", (socket) => {
     io.to(p).emit("chatMessage", row);
   });
 
-  // ---- delete message (TON EVENT + ack)
   socket.on("deleteMessage", ({ project, messageId } = {}, ack) => {
     const p = cleanStr(project) || cleanStr(socket.data.project);
     const mid = Number(messageId);
@@ -279,7 +294,6 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // autoriser suppression seulement si même userId (si présent)
     const owner = cleanStr(arr[idx]?.userId);
     if (owner && uid && owner !== uid) {
       if (typeof ack === "function") ack({ ok: false, error: "forbidden" });
@@ -294,7 +308,6 @@ io.on("connection", (socket) => {
     if (typeof ack === "function") ack({ ok: true });
   });
 
-  // ---- disconnect -> remove presence + emit
   socket.on("disconnect", (reason) => {
     const p = socket.data.project;
     if (p) {
@@ -306,7 +319,30 @@ io.on("connection", (socket) => {
 });
 
 // =========================
-// Message helpers
+// ✅ SPA fallback : si index.html existe, on le sert sur tout le reste
+// (à mettre après les routes API)
+// =========================
+app.get("*", (req, res) => {
+  // Laisse passer les routes d’API si tu en ajoutes plus tard
+  if (req.path.startsWith("/uploads/")) return res.status(404).end();
+
+  if (fs.existsSync(INDEX_HTML)) {
+    res.setHeader("Cache-Control", "no-store");
+    return res.sendFile(INDEX_HTML);
+  }
+  return res.status(404).json({ ok: false, error: "not_found", path: req.path });
+});
+
+// =========================
+// Error handler Express (évite silence)
+// =========================
+app.use((err, _req, res, _next) => {
+  console.error("🔥 Express error:", err);
+  res.status(500).json({ ok: false, error: "server_error", detail: String(err?.message || err) });
+});
+
+// =========================
+// Helpers
 // =========================
 function cleanStr(v) { return String(v ?? "").trim(); }
 
@@ -333,8 +369,7 @@ function saveJson(file, data) {
   try { fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8"); } catch {}
 }
 
-// ID monotone in-memory (OK pour session)
-// (si tu veux persistant, je te mets un compteur dans storage)
+// ID monotone in-memory
 let nextId = 1;
 
 function makeMessage({ project, username, userId, message, attachment }) {
@@ -354,7 +389,6 @@ function pushMessage(project, msg) {
   if (!messagesByProject[p]) messagesByProject[p] = [];
   messagesByProject[p].push(msg);
 
-  // cap historique
   if (messagesByProject[p].length > 600) {
     messagesByProject[p] = messagesByProject[p].slice(-600);
   }
@@ -365,7 +399,18 @@ function pushMessage(project, msg) {
 // Listen (Railway PORT)
 // =========================
 const PORT = Number(process.env.PORT || 8080);
-server.listen(PORT, () => {
+
+server.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on", PORT);
   console.log("Version:", VERSION);
+});
+
+// =========================
+// Process-level safety logs
+// =========================
+process.on("unhandledRejection", (e) => {
+  console.error("💥 unhandledRejection:", e);
+});
+process.on("uncaughtException", (e) => {
+  console.error("💥 uncaughtException:", e);
 });

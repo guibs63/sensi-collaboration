@@ -1083,6 +1083,7 @@ async function initSocket() {
   }
 
   socket = ioFn(window.location.origin, {
+    path: "/socket.io",
     transports: ["websocket", "polling"],
     reconnection: true,
     reconnectionAttempts: 10,
