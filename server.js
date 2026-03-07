@@ -1,12 +1,13 @@
 
- 
- 
- 
-// guibs:/server.js (COMPLET) — ULTRA v3.5.1 — protected global room + socket client local ✅
+
+
+
+
+// guibs:/server.js (COMPLET) — ULTRA v3.5.0 — AI + web search + file analysis + office generation ✅
 // Base stable Railway/Socket + IA OpenAI (Responses API) + transcription + génération docx/xlsx/pptx/png
- 
+
 "use strict";
- 
+
 const express = require("express");
 const cors = require("cors");
 const http = require("http");
@@ -18,7 +19,7 @@ const { Server } = require("socket.io");
 const { Document, Packer, Paragraph, HeadingLevel, TextRun } = require("docx");
 const ExcelJS = require("exceljs");
 const PptxGenJS = require("pptxgenjs");
- 
+
 // =========================
 // App
 // =========================
@@ -27,7 +28,13 @@ app.set("trust proxy", 1);
 app.use(cors({ origin: "*", methods: ["GET", "POST"] }));
 app.use(express.json({ limit: "10mb" }));
 app.disable("x-powered-by");
- 
+app.use((req, res, next) => {
+  if (req.path.startsWith("/socket.io/")) {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+  }
+  next();
+});
+
 // =========================
 // Paths & storage
 // =========================
@@ -39,19 +46,18 @@ const INDEX_HTML = path.join(ROOT, "index.html");
 const PROJECTS_FILE = path.join(STORAGE_DIR, "projects.json");
 const MESSAGES_FILE = path.join(STORAGE_DIR, "messages.json");
 const META_FILE = path.join(STORAGE_DIR, "project-meta.json");
-const DEFAULT_PROJECT = "global";
- 
+
 ensureDir(STORAGE_DIR);
 ensureDir(UPLOADS_DIR);
 ensureDir(GENERATED_DIR);
- 
+
 app.use("/uploads", express.static(UPLOADS_DIR, { fallthrough: true }));
 app.use(express.static(ROOT, { fallthrough: true }));
- 
+
 // =========================
 // AI config
 // =========================
-const VERSION = "ultra-v3.5.2-ai-workspace-safe-rooms";
+const VERSION = "ultra-v3.5.3-ai-workspace-safe-rooms-socketfix";
 const OPENAI_API_KEY = cleanStr(process.env.OPENAI_API_KEY);
 const AI_ENABLED = Boolean(OPENAI_API_KEY);
 const MODEL_TEXT = cleanStr(process.env.OPENAI_MODEL_TEXT) || "gpt-4.1-mini";
@@ -59,35 +65,55 @@ const MODEL_WEB = cleanStr(process.env.OPENAI_MODEL_WEB) || "gpt-5";
 const MODEL_IMAGE = cleanStr(process.env.OPENAI_MODEL_IMAGE) || "gpt-4.1-mini";
 const MODEL_TRANSCRIBE = cleanStr(process.env.OPENAI_MODEL_TRANSCRIBE) || "gpt-4o-mini-transcribe";
 const AI_BOT_NAME = cleanStr(process.env.AI_BOT_NAME) || "Sensi";
- 
+const DEFAULT_PROJECT = "global";
+
 const openai = AI_ENABLED ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
- 
+
 // =========================
 // Persistence
 // =========================
-function normalizeProjects(list) {
-  const src = Array.isArray(list) ? list : [];
-  const cleaned = [];
-  for (const item of src) {
-    const p = cleanStr(item);
-    if (p && !cleaned.includes(p)) cleaned.push(p);
-  }
-  if (!cleaned.includes(DEFAULT_PROJECT)) cleaned.unshift(DEFAULT_PROJECT);
-  return cleaned;
-}
- 
-let projects = normalizeProjects(loadJson(PROJECTS_FILE, [DEFAULT_PROJECT]));
+let projects = normalizeProjects(loadJson(PROJECTS_FILE, [DEFAULT_PROJECT, "Evercell"]));
 let messagesByProject = loadJson(MESSAGES_FILE, {});
 let projectMeta = loadJson(META_FILE, {}); // { [project]: { latestAttachment, lastGenerated } }
 let nextId = computeNextId(messagesByProject);
- 
+
+ensureDefaultProjectState();
+
 function saveAll() {
   projects = normalizeProjects(projects);
+  ensureDefaultProjectState();
   saveJson(PROJECTS_FILE, projects);
   saveJson(MESSAGES_FILE, messagesByProject);
   saveJson(META_FILE, projectMeta);
 }
- 
+
+function normalizeProjects(list) {
+  const uniq = [];
+  const seen = new Set();
+  for (const item of Array.isArray(list) ? list : []) {
+    const p = cleanStr(item);
+    if (!p || seen.has(p)) continue;
+    seen.add(p);
+    uniq.push(p);
+  }
+  if (!seen.has(DEFAULT_PROJECT)) {
+    uniq.unshift(DEFAULT_PROJECT);
+  }
+  return uniq;
+}
+
+function ensureDefaultProjectState() {
+  projects = normalizeProjects(projects);
+  if (!Array.isArray(messagesByProject[DEFAULT_PROJECT])) {
+    messagesByProject[DEFAULT_PROJECT] = [];
+  }
+  ensureProjectMeta(DEFAULT_PROJECT);
+}
+
+function projectExists(project) {
+  return projects.includes(cleanStr(project));
+}
+
 function ensureProjectMeta(project) {
   if (!projectMeta[project]) {
     projectMeta[project] = {
@@ -97,18 +123,7 @@ function ensureProjectMeta(project) {
   }
   return projectMeta[project];
 }
- 
-function ensureDefaultProject() {
-  projects = normalizeProjects(projects);
-  if (!Array.isArray(messagesByProject[DEFAULT_PROJECT])) {
-    messagesByProject[DEFAULT_PROJECT] = [];
-  }
-  ensureProjectMeta(DEFAULT_PROJECT);
-}
- 
-ensureDefaultProject();
-saveAll();
- 
+
 // =========================
 // Health
 // =========================
@@ -128,16 +143,15 @@ app.get("/health", (_req, res) => {
     },
   });
 });
- 
+
 // =========================
 // /projects
 // =========================
 app.get("/projects", (_req, res) => {
-  ensureDefaultProject();
-  saveAll();
+  ensureDefaultProjectState();
   res.json({ ok: true, projects });
 });
- 
+
 // =========================
 // Uploads
 // =========================
@@ -153,19 +167,21 @@ const upload = multer({
     fileSize: 25 * 1024 * 1024,
   },
 });
- 
+
 app.post("/upload", upload.single("file"), (req, res) => {
   try {
     const f = req.file;
     if (!f) {
       return res.status(400).json({ ok: false, error: "No file" });
     }
- 
+
     const url = `/uploads/${encodeURIComponent(f.filename)}`;
-    const project = cleanStr(req.body?.project);
+    let project = cleanStr(req.body?.project);
+    ensureDefaultProjectState();
+    if (project && !projectExists(project)) project = DEFAULT_PROJECT;
     const username = cleanStr(req.body?.username) || "Anonyme";
     const userId = cleanStr(req.body?.userId) || "";
- 
+
     if (project) {
       const meta = ensureProjectMeta(project);
       meta.latestAttachment = {
@@ -179,7 +195,7 @@ app.post("/upload", upload.single("file"), (req, res) => {
         uploadedBy: username,
       };
       saveJson(META_FILE, projectMeta);
- 
+
       const msg = makeMessage({
         project,
         username,
@@ -195,14 +211,14 @@ app.post("/upload", upload.single("file"), (req, res) => {
       pushMessage(project, msg);
       io.to(project).emit("chatMessage", msg);
     }
- 
+
     return res.json({ ok: true, url, filename: f.originalname, mimetype: f.mimetype, size: f.size });
   } catch (e) {
     console.error("🔥 Upload error:", e);
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
- 
+
 app.post("/transcribe", upload.single("audio"), async (req, res) => {
   try {
     if (!AI_ENABLED) {
@@ -211,21 +227,21 @@ app.post("/transcribe", upload.single("audio"), async (req, res) => {
     if (!req.file) {
       return res.status(400).json({ ok: false, error: "No audio" });
     }
- 
+
     const transcript = await openai.audio.transcriptions.create({
       file: fs.createReadStream(req.file.path),
       model: MODEL_TRANSCRIBE,
       response_format: "json",
       language: "fr",
     });
- 
+
     return res.json({ ok: true, text: cleanStr(transcript?.text) });
   } catch (e) {
     console.error("🔥 Transcribe error:", e);
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
- 
+
 // =========================
 // Root
 // =========================
@@ -236,7 +252,7 @@ app.get("/", (_req, res) => {
   }
   return res.status(200).send("OK (no index.html in build)");
 });
- 
+
 // =========================
 // HTTP + Socket.IO
 // =========================
@@ -249,24 +265,24 @@ const io = new Server(server, {
   maxHttpBufferSize: 10 * 1024 * 1024,
   connectTimeout: 45000,
   allowEIO3: false,
-  serveClient: true,
+  serveClient: false,
 });
- 
+
 // =========================
 // Presence
 // =========================
 const presenceByProject = new Map();
- 
+
 function getPresenceList(project) {
   const map = presenceByProject.get(project);
   if (!map) return [];
   return Array.from(map.values());
 }
- 
+
 function emitPresence(project) {
   io.to(project).emit("presenceUpdate", { project, users: getPresenceList(project) });
 }
- 
+
 function presenceJoin(socket, project, username, userId) {
   if (!presenceByProject.has(project)) {
     presenceByProject.set(project, new Map());
@@ -274,7 +290,7 @@ function presenceJoin(socket, project, username, userId) {
   presenceByProject.get(project).set(socket.id, { username, userId });
   emitPresence(project);
 }
- 
+
 function presenceLeave(socket, project) {
   const map = presenceByProject.get(project);
   if (map) {
@@ -285,17 +301,18 @@ function presenceLeave(socket, project) {
   }
   emitPresence(project);
 }
- 
+
 // =========================
 // Socket events
 // =========================
 io.on("connection", (socket) => {
   console.log("🔌 connected", socket.id);
- 
+
   socket.on("getProjects", () => {
+    ensureDefaultProjectState();
     socket.emit("projectsUpdate", { projects });
   });
- 
+
   socket.on("createProject", ({ name } = {}, ack) => {
     const p = cleanStr(name);
     if (!isValidProjectName(p)) {
@@ -303,78 +320,74 @@ io.on("connection", (socket) => {
       if (typeof ack === "function") ack(resp);
       return;
     }
- 
+
     if (!projects.includes(p)) {
       projects.push(p);
-      ensureProjectMeta(p);
-      saveAll();
     }
+    saveAll();
     io.emit("projectsUpdate", { projects });
     const resp = { ok: true, project: p, projects };
     if (typeof ack === "function") ack(resp);
   });
- 
+
   socket.on("deleteProject", ({ project } = {}, ack) => {
     const p = cleanStr(project);
     if (!p) {
-      if (typeof ack === "function") ack({ ok: false, error: "bad_request", message: "Projet manquant." });
+      if (typeof ack === "function") ack({ ok: false, error: "bad_request", message: "Projet invalide." });
       return;
     }
     if (p === DEFAULT_PROJECT) {
-      if (typeof ack === "function") ack({ ok: false, error: "protected_project", message: 'Impossible de supprimer le projet "global".' });
+      if (typeof ack === "function") ack({ ok: false, error: "forbidden", message: "Impossible d'effacer le projet par défaut \"global\"." });
       return;
     }
-    if (projects.length <= 1) {
-      if (typeof ack === "function") ack({ ok: false, error: "last_project", message: "Impossible de supprimer le dernier projet restant." });
-      return;
-    }
-    if (!projects.includes(p)) {
+    if (!projectExists(p)) {
       if (typeof ack === "function") ack({ ok: false, error: "not_found", message: "Projet introuvable." });
       return;
     }
- 
+    if (projects.length <= 1) {
+      if (typeof ack === "function") ack({ ok: false, error: "last_project", message: "Impossible d'effacer : il doit rester au moins un projet." });
+      return;
+    }
+
     projects = projects.filter((x) => x !== p);
     delete messagesByProject[p];
     delete projectMeta[p];
-    ensureDefaultProject();
     saveAll();
- 
+
     io.to(p).emit("projectDeleted", { project: p, fallbackProject: DEFAULT_PROJECT });
     presenceByProject.delete(p);
-    io.emit("projectsUpdate", { projects });
+    io.emit("projectsUpdate", { projects, defaultProject: DEFAULT_PROJECT });
     io.to(p).emit("presenceUpdate", { project: p, users: [] });
- 
-    if (typeof ack === "function") ack({ ok: true, project: p, projects, fallbackProject: DEFAULT_PROJECT });
+
+    if (typeof ack === "function") ack({ ok: true, project: p, fallbackProject: DEFAULT_PROJECT, projects });
   });
- 
+
   socket.on("joinProject", ({ username, project, userId } = {}) => {
-    ensureDefaultProject();
-    const requested = cleanStr(project);
-    const p = projects.includes(requested) ? requested : DEFAULT_PROJECT;
+    let p = cleanStr(project);
     const u = cleanStr(username) || "Anonyme";
     const uid = cleanStr(userId) || "";
-    if (!p) return;
- 
+    ensureDefaultProjectState();
+    if (!p || !projectExists(p)) {
+      p = DEFAULT_PROJECT;
+    }
+
     const prev = socket.data.project;
     if (prev && prev !== p) {
       try { socket.leave(prev); } catch {}
       presenceLeave(socket, prev);
     }
- 
+
     socket.data.project = p;
     socket.data.username = u;
     socket.data.userId = uid;
     socket.join(p);
- 
+
     const hist = Array.isArray(messagesByProject[p]) ? messagesByProject[p] : [];
     socket.emit("chatHistory", { project: p, messages: hist });
-    if (requested && requested !== p) {
-      socket.emit("systemMessage", { project: p, text: `ℹ️ Projet introuvable. Bascule automatique vers "${DEFAULT_PROJECT}".` });
-    }
     io.to(p).emit("systemMessage", { project: p, text: `👋 ${u} a rejoint le projet.` });
     presenceJoin(socket, p, u, uid);
   });
- 
+
   socket.on("leaveProject", () => {
     const p = cleanStr(socket.data.project);
     if (!p) return;
@@ -383,20 +396,20 @@ io.on("connection", (socket) => {
     io.to(p).emit("systemMessage", { project: p, text: `👋 ${socket.data.username || "Un user"} a quitté le projet.` });
     socket.data.project = null;
   });
- 
+
   socket.on("chatMessage", async ({ username, userId, message, project } = {}) => {
     const p = cleanStr(project) || cleanStr(socket.data.project);
     if (!p) return;
- 
+
     const u = cleanStr(username) || cleanStr(socket.data.username) || "Anonyme";
     const uid = cleanStr(userId) || cleanStr(socket.data.userId) || "";
     const msg = cleanStr(message);
     if (!msg) return;
- 
+
     const row = makeMessage({ project: p, username: u, userId: uid, message: msg });
     pushMessage(p, row);
     io.to(p).emit("chatMessage", row);
- 
+
     try {
       if (shouldInvokeAI(msg)) {
         await handleAIRequest({ project: p, username: u, userId: uid, message: msg });
@@ -406,7 +419,7 @@ io.on("connection", (socket) => {
       await emitBotText(p, `⚠️ IA indisponible : ${String(e?.message || e)}`);
     }
   });
- 
+
   socket.on("deleteMessage", ({ project, messageId } = {}, ack) => {
     const p = cleanStr(project) || cleanStr(socket.data.project);
     const mid = Number(messageId);
@@ -414,7 +427,7 @@ io.on("connection", (socket) => {
       if (typeof ack === "function") ack({ ok: false, error: "bad_request" });
       return;
     }
- 
+
     const uid = cleanStr(socket.data.userId);
     const arr = Array.isArray(messagesByProject[p]) ? messagesByProject[p] : [];
     const idx = arr.findIndex((m) => Number(m.id) === mid);
@@ -422,20 +435,20 @@ io.on("connection", (socket) => {
       if (typeof ack === "function") ack({ ok: false, error: "not_found" });
       return;
     }
- 
+
     const owner = cleanStr(arr[idx]?.userId);
     if (owner && uid && owner !== uid) {
       if (typeof ack === "function") ack({ ok: false, error: "forbidden" });
       return;
     }
- 
+
     arr.splice(idx, 1);
     messagesByProject[p] = arr;
     saveJson(MESSAGES_FILE, messagesByProject);
     io.to(p).emit("messageDeleted", { project: p, messageId: mid });
     if (typeof ack === "function") ack({ ok: true });
   });
- 
+
   socket.on("disconnect", (reason) => {
     const p = cleanStr(socket.data.project);
     if (p) {
@@ -444,12 +457,12 @@ io.on("connection", (socket) => {
     }
     console.log("❌ disconnected", socket.id, reason);
   });
- 
+
   socket.on("error", (err) => {
     console.error("💥 socket error:", socket.id, err);
   });
 });
- 
+
 // =========================
 // AI dispatcher
 // =========================
@@ -469,16 +482,16 @@ function shouldInvokeAI(message) {
     m.startsWith("/help")
   );
 }
- 
+
 async function handleAIRequest({ project, username, userId, message }) {
   if (!AI_ENABLED) {
     await emitBotText(project, "🔒 IA désactivée : ajoute OPENAI_API_KEY dans Railway > Variables, puis redeploy.");
     return;
   }
- 
+
   const raw = cleanStr(message);
   const lower = raw.toLowerCase();
- 
+
   if (lower === "/help" || lower === "@sensi /help" || lower === "@sensi help") {
     await emitBotText(project,
       "Commandes IA :\n" +
@@ -492,14 +505,14 @@ async function handleAIRequest({ project, username, userId, message }) {
     );
     return;
   }
- 
+
   if (lower.startsWith("/web ")) {
     const query = cleanStr(raw.slice(5));
     const answer = await askAIWithWeb(query);
     await emitBotText(project, answer.text);
     return;
   }
- 
+
   if (lower === "/analyze" || lower === "/analyse" || lower.startsWith("/analyze ") || lower.startsWith("/analyse ")) {
     const meta = ensureProjectMeta(project);
     if (!meta.latestAttachment?.path) {
@@ -510,40 +523,40 @@ async function handleAIRequest({ project, username, userId, message }) {
     await emitBotText(project, answer.text);
     return;
   }
- 
+
   if (lower.startsWith("/docx ")) {
     const brief = cleanStr(raw.slice(6));
     const generated = await generateDocxForProject(project, brief, username);
     await emitGeneratedFile(project, generated, "📄 Document Word généré.");
     return;
   }
- 
+
   if (lower.startsWith("/xlsx ")) {
     const brief = cleanStr(raw.slice(6));
     const generated = await generateXlsxForProject(project, brief, username);
     await emitGeneratedFile(project, generated, "📊 Classeur Excel généré.");
     return;
   }
- 
+
   if (lower.startsWith("/pptx ")) {
     const brief = cleanStr(raw.slice(6));
     const generated = await generatePptxForProject(project, brief, username);
     await emitGeneratedFile(project, generated, "📽️ Présentation PowerPoint générée.");
     return;
   }
- 
+
   if (lower.startsWith("/image ")) {
     const brief = cleanStr(raw.slice(7));
     const generated = await generateImageForProject(project, brief, username);
     await emitGeneratedFile(project, generated, "🖼️ Image générée.");
     return;
   }
- 
+
   const prompt = raw.startsWith("@sensi") ? cleanStr(raw.replace(/^@sensi\s*/i, "")) : cleanStr(raw.replace(/^\/ai\s*/i, ""));
   const answer = await askAIText(prompt, { project, username, userId });
   await emitBotText(project, answer.text);
 }
- 
+
 async function askAIText(prompt, ctx = {}) {
   const system = [
     "Tu es Sensi, une assistante professionnelle intégrée à un espace collaboratif temps réel.",
@@ -552,16 +565,16 @@ async function askAIText(prompt, ctx = {}) {
     `Projet courant : ${ctx.project || "inconnu"}.`,
     `Utilisateur courant : ${ctx.username || "inconnu"}.`,
   ].join(" ");
- 
+
   const response = await openai.responses.create({
     model: MODEL_TEXT,
     instructions: system,
     input: prompt,
   });
- 
+
   return { text: cleanStr(response.output_text) || "(aucune réponse)" };
 }
- 
+
 async function askAIWithWeb(prompt) {
   const response = await openai.responses.create({
     model: MODEL_WEB,
@@ -570,7 +583,7 @@ async function askAIWithWeb(prompt) {
     instructions: "Réponds en français. Cite clairement les sources pertinentes à la fin avec leur URL.",
     input: prompt,
   });
- 
+
   let text = cleanStr(response.output_text) || "(aucune réponse)";
   const sources = collectWebSources(response.output || []);
   if (sources.length) {
@@ -578,19 +591,19 @@ async function askAIWithWeb(prompt) {
   }
   return { text };
 }
- 
+
 async function analyzeProjectFile(project, userPrompt) {
   const meta = ensureProjectMeta(project);
   const att = meta.latestAttachment;
   const fileId = await uploadFileToOpenAI(att.path, att.filename, att.mimetype);
- 
+
   const prompt = [
     `Analyse le fichier \"${att.filename}\" pour un espace collaboratif.`,
     "Donne : 1) résumé exécutif, 2) points clés, 3) risques/incohérences éventuels, 4) actions recommandées.",
     `Consigne utilisateur complémentaire : ${userPrompt}`,
     "Réponds en français, de façon exploitable et professionnelle.",
   ].join("\n");
- 
+
   const response = await openai.responses.create({
     model: MODEL_TEXT,
     input: [
@@ -600,10 +613,10 @@ async function analyzeProjectFile(project, userPrompt) {
       ] },
     ],
   });
- 
+
   return { text: cleanStr(response.output_text) || `Analyse terminée pour ${att.filename}.` };
 }
- 
+
 async function generateDocxForProject(project, brief, username) {
   const spec = await askForStructuredJson(
     [
@@ -614,11 +627,11 @@ async function generateDocxForProject(project, brief, username) {
       `Brief : ${brief}`,
     ].join("\n")
   );
- 
+
   const title = cleanStr(spec.title) || "Document Sensi";
   const subtitle = cleanStr(spec.subtitle) || `Projet ${project}`;
   const sections = Array.isArray(spec.sections) ? spec.sections : [];
- 
+
   const doc = new Document({
     sections: [{
       properties: {},
@@ -649,14 +662,14 @@ async function generateDocxForProject(project, brief, username) {
       ],
     }],
   });
- 
+
   const buffer = await Packer.toBuffer(doc);
   const safe = `${Date.now()}_${safeFileName(title)}.docx`;
   const full = path.join(GENERATED_DIR, safe);
   fs.writeFileSync(full, buffer);
   return buildGeneratedAttachment(project, full, `/uploads/generated/${encodeURIComponent(safe)}`, `${title}.docx`, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", username);
 }
- 
+
 async function generateXlsxForProject(project, brief, username) {
   const spec = await askForStructuredJson(
     [
@@ -667,21 +680,21 @@ async function generateXlsxForProject(project, brief, username) {
       `Brief : ${brief}`,
     ].join("\n")
   );
- 
+
   const wb = new ExcelJS.Workbook();
   wb.creator = AI_BOT_NAME;
   wb.created = new Date();
   const ws = wb.addWorksheet("Sensi");
- 
+
   const title = cleanStr(spec.title) || "Synthèse";
   const columns = (Array.isArray(spec.columns) && spec.columns.length ? spec.columns : ["Élément", "Détail", "Action"]).map((x) => cleanStr(x) || "Colonne");
   const rows = Array.isArray(spec.rows) ? spec.rows : [];
- 
+
   ws.mergeCells(1, 1, 1, columns.length);
   ws.getCell(1, 1).value = title;
   ws.getCell(1, 1).font = { bold: true, size: 16 };
   ws.getCell(1, 1).alignment = { vertical: "middle", horizontal: "left" };
- 
+
   ws.addRow([]);
   const header = ws.addRow(columns);
   header.font = { bold: true };
@@ -690,25 +703,25 @@ async function generateXlsxForProject(project, brief, username) {
     cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFDCE6F1" } };
     cell.border = thinBorder();
   });
- 
+
   for (const row of rows) {
     const data = Array.isArray(row) ? row.map((x) => cleanStr(x)) : columns.map(() => "");
     const added = ws.addRow(data);
     added.alignment = { vertical: "top", wrapText: true };
     added.eachCell((cell) => { cell.border = thinBorder(); });
   }
- 
+
   ws.columns.forEach((col, idx) => {
     const maxLen = Math.max(columns[idx]?.length || 10, 18);
     col.width = Math.min(Math.max(maxLen + 4, 18), 34);
   });
- 
+
   const safe = `${Date.now()}_${safeFileName(title)}.xlsx`;
   const full = path.join(GENERATED_DIR, safe);
   await wb.xlsx.writeFile(full);
   return buildGeneratedAttachment(project, full, `/uploads/generated/${encodeURIComponent(safe)}`, `${title}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", username);
 }
- 
+
 async function generatePptxForProject(project, brief, username) {
   const spec = await askForStructuredJson(
     [
@@ -719,7 +732,7 @@ async function generatePptxForProject(project, brief, username) {
       `Brief : ${brief}`,
     ].join("\n")
   );
- 
+
   const pptx = new PptxGenJS();
   pptx.layout = "LAYOUT_WIDE";
   pptx.author = AI_BOT_NAME;
@@ -727,13 +740,13 @@ async function generatePptxForProject(project, brief, username) {
   pptx.title = cleanStr(spec.title) || "Présentation Sensi";
   pptx.company = "Sensi Collaboration";
   pptx.lang = "fr-FR";
- 
+
   const title = cleanStr(spec.title) || "Présentation Sensi";
   const first = pptx.addSlide();
   first.addText(title, { x: 0.6, y: 0.8, w: 11.4, h: 0.8, fontSize: 24, bold: true, color: "1F2937" });
   first.addText(`Projet : ${project}`, { x: 0.6, y: 1.7, w: 7.5, h: 0.4, fontSize: 12, color: "4B5563" });
   first.addShape(pptx.ShapeType.rect, { x: 0.6, y: 2.2, w: 5.2, h: 0.12, line: { color: "7C3AED", pt: 1 }, fill: { color: "7C3AED" } });
- 
+
   const slides = Array.isArray(spec.slides) ? spec.slides : [];
   for (const slideSpec of slides) {
     const slide = pptx.addSlide();
@@ -752,13 +765,13 @@ async function generatePptxForProject(project, brief, username) {
       paraSpaceAfterPt: 12,
     });
   }
- 
+
   const safe = `${Date.now()}_${safeFileName(title)}.pptx`;
   const full = path.join(GENERATED_DIR, safe);
   await pptx.writeFile({ fileName: full });
   return buildGeneratedAttachment(project, full, `/uploads/generated/${encodeURIComponent(safe)}`, `${title}.pptx`, "application/vnd.openxmlformats-officedocument.presentationml.presentation", username);
 }
- 
+
 async function generateImageForProject(project, brief, username) {
   const response = await openai.responses.create({
     model: MODEL_IMAGE,
@@ -766,25 +779,25 @@ async function generateImageForProject(project, brief, username) {
     tool_choice: { type: "image_generation" },
     input: `Crée une image professionnelle pour ce brief : ${brief}`,
   });
- 
+
   const img = (response.output || []).find((item) => item.type === "image_generation_call" && item.result);
   if (!img?.result) {
     throw new Error("Aucune image générée par l'API");
   }
- 
+
   const safe = `${Date.now()}_sensi-image.png`;
   const full = path.join(GENERATED_DIR, safe);
   fs.writeFileSync(full, Buffer.from(img.result, "base64"));
   return buildGeneratedAttachment(project, full, `/uploads/generated/${encodeURIComponent(safe)}`, safe, "image/png", username);
 }
- 
+
 async function askForStructuredJson(prompt) {
   const response = await openai.responses.create({
     model: MODEL_TEXT,
     instructions: "Réponds uniquement avec un JSON valide, sans commentaire avant ou après.",
     input: prompt,
   });
- 
+
   const text = cleanStr(response.output_text);
   try {
     return JSON.parse(text);
@@ -797,7 +810,7 @@ async function askForStructuredJson(prompt) {
     throw new Error("Impossible de parser le JSON IA");
   }
 }
- 
+
 async function uploadFileToOpenAI(localPath, filename, mimetype) {
   const uploaded = await openai.files.create({
     purpose: "user_data",
@@ -805,7 +818,7 @@ async function uploadFileToOpenAI(localPath, filename, mimetype) {
   });
   return uploaded.id;
 }
- 
+
 function collectWebSources(outputItems) {
   const sources = [];
   for (const item of outputItems || []) {
@@ -825,7 +838,7 @@ function collectWebSources(outputItems) {
     return true;
   }).slice(0, 8);
 }
- 
+
 async function emitBotText(project, text) {
   const row = makeMessage({
     project,
@@ -836,7 +849,7 @@ async function emitBotText(project, text) {
   pushMessage(project, row);
   io.to(project).emit("chatMessage", row);
 }
- 
+
 async function emitGeneratedFile(project, generated, introText) {
   const row = makeMessage({
     project,
@@ -847,12 +860,12 @@ async function emitGeneratedFile(project, generated, introText) {
   });
   pushMessage(project, row);
   io.to(project).emit("chatMessage", row);
- 
+
   const meta = ensureProjectMeta(project);
   meta.lastGenerated = generated.attachment;
   saveJson(META_FILE, projectMeta);
 }
- 
+
 function buildGeneratedAttachment(project, fullPath, url, filename, mimetype, requestedBy) {
   const attachment = {
     url,
@@ -862,7 +875,7 @@ function buildGeneratedAttachment(project, fullPath, url, filename, mimetype, re
   };
   return { project, fullPath, attachment, requestedBy };
 }
- 
+
 // =========================
 // SPA fallback
 // =========================
@@ -876,27 +889,27 @@ app.get("*", (req, res) => {
   }
   return res.status(404).json({ ok: false, error: "not_found", path: req.path });
 });
- 
+
 app.use((err, _req, res, _next) => {
   console.error("🔥 Express error:", err);
   res.status(500).json({ ok: false, error: "server_error", detail: String(err?.message || err) });
 });
- 
+
 // =========================
 // Helpers
 // =========================
 function cleanStr(v) {
   return String(v ?? "").trim();
 }
- 
+
 function ensureDir(dir) {
   try { fs.mkdirSync(dir, { recursive: true }); } catch {}
 }
- 
+
 function isValidProjectName(name) {
   return /^[a-zA-Z0-9 _\.\-]{2,50}$/.test(cleanStr(name));
 }
- 
+
 function loadJson(file, fallback) {
   try {
     if (!fs.existsSync(file)) return fallback;
@@ -907,7 +920,7 @@ function loadJson(file, fallback) {
     return fallback;
   }
 }
- 
+
 function saveJson(file, data) {
   try {
     fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8");
@@ -915,7 +928,7 @@ function saveJson(file, data) {
     console.error("💥 saveJson error:", file, e);
   }
 }
- 
+
 function computeNextId(allMessages) {
   try {
     let maxId = 0;
@@ -931,7 +944,7 @@ function computeNextId(allMessages) {
     return 1;
   }
 }
- 
+
 function makeMessage({ project, username, userId, message, attachment }) {
   return {
     id: nextId++,
@@ -943,7 +956,7 @@ function makeMessage({ project, username, userId, message, attachment }) {
     attachment: attachment || null,
   };
 }
- 
+
 function pushMessage(project, msg) {
   const p = cleanStr(project);
   if (!messagesByProject[p]) messagesByProject[p] = [];
@@ -953,7 +966,7 @@ function pushMessage(project, msg) {
   }
   saveJson(MESSAGES_FILE, messagesByProject);
 }
- 
+
 function safeFileName(name) {
   return String(name || "file")
     .normalize("NFD")
@@ -962,7 +975,7 @@ function safeFileName(name) {
     .replace(/_+/g, "_")
     .replace(/^_+|_+$/g, "") || "file";
 }
- 
+
 function safeStatSize(file) {
   try {
     return fs.statSync(file).size;
@@ -970,7 +983,7 @@ function safeStatSize(file) {
     return 0;
   }
 }
- 
+
 function thinBorder() {
   return {
     top: { style: "thin", color: { argb: "FFD1D5DB" } },
@@ -979,7 +992,7 @@ function thinBorder() {
     right: { style: "thin", color: { argb: "FFD1D5DB" } },
   };
 }
- 
+
 // =========================
 // Listen
 // =========================
@@ -989,7 +1002,7 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log("Version:", VERSION);
   console.log("AI:", AI_ENABLED ? `enabled (${MODEL_TEXT})` : "disabled");
 });
- 
+
 // =========================
 // Shutdown / safety
 // =========================
@@ -1011,8 +1024,9 @@ function shutdown(signal) {
     process.exit(1);
   }
 }
- 
+
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("unhandledRejection", (e) => console.error("💥 unhandledRejection:", e));
+process.on("uncaughtException", (e) => console.error("💥 uncaughtException:", e));
 process.on("uncaughtException", (e) => console.error("💥 uncaughtException:", e));
