@@ -1,10 +1,5 @@
-
-
-
-
-
-// guibs:/server.js (COMPLET) — ULTRA v3.5.0 — AI + web search + file analysis + office generation ✅
-// Base stable Railway/Socket + IA OpenAI (Responses API) + transcription + génération docx/xlsx/pptx/png
+// guibs:/server.js (COMPLET) — ULTRA v3.6.0 — intuitive AI + file/media interpretation + auto analyze ✅
+// Base stable Railway/Socket + IA OpenAI (Responses API) + transcription + interprétation docs/images/audio + génération docx/xlsx/pptx/png
 
 "use strict";
 
@@ -57,15 +52,21 @@ app.use(express.static(ROOT, { fallthrough: true }));
 // =========================
 // AI config
 // =========================
-const VERSION = "ultra-v3.5.3-ai-workspace-safe-rooms-socketfix";
+const VERSION = "ultra-v3.6.0-intuitive-ai-file-interpreter";
 const OPENAI_API_KEY = cleanStr(process.env.OPENAI_API_KEY);
 const AI_ENABLED = Boolean(OPENAI_API_KEY);
+
 const MODEL_TEXT = cleanStr(process.env.OPENAI_MODEL_TEXT) || "gpt-4.1-mini";
 const MODEL_WEB = cleanStr(process.env.OPENAI_MODEL_WEB) || "gpt-5";
 const MODEL_IMAGE = cleanStr(process.env.OPENAI_MODEL_IMAGE) || "gpt-4.1-mini";
 const MODEL_TRANSCRIBE = cleanStr(process.env.OPENAI_MODEL_TRANSCRIBE) || "gpt-4o-mini-transcribe";
+
 const AI_BOT_NAME = cleanStr(process.env.AI_BOT_NAME) || "Sensi";
 const DEFAULT_PROJECT = "global";
+
+const AUTO_ANALYZE_UPLOADS = parseBooleanEnv(process.env.AUTO_ANALYZE_UPLOADS, true);
+const AUTO_ANALYZE_DELAY_MS = Number(process.env.AUTO_ANALYZE_DELAY_MS || 900);
+const MAX_CONTEXT_MESSAGES = Math.max(4, Number(process.env.MAX_CONTEXT_MESSAGES || 10));
 
 const openai = AI_ENABLED ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 
@@ -74,7 +75,7 @@ const openai = AI_ENABLED ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 // =========================
 let projects = normalizeProjects(loadJson(PROJECTS_FILE, [DEFAULT_PROJECT, "Evercell"]));
 let messagesByProject = loadJson(MESSAGES_FILE, {});
-let projectMeta = loadJson(META_FILE, {}); // { [project]: { latestAttachment, lastGenerated } }
+let projectMeta = loadJson(META_FILE, {}); // { [project]: { latestAttachment, lastGenerated, latestAnalysis } }
 let nextId = computeNextId(messagesByProject);
 
 ensureDefaultProjectState();
@@ -119,6 +120,7 @@ function ensureProjectMeta(project) {
     projectMeta[project] = {
       latestAttachment: null,
       lastGenerated: null,
+      latestAnalysis: null,
     };
   }
   return projectMeta[project];
@@ -140,6 +142,9 @@ app.get("/health", (_req, res) => {
       file_analysis: AI_ENABLED,
       office_generation: AI_ENABLED,
       image_generation: AI_ENABLED,
+      natural_ai_triggers: AI_ENABLED,
+      media_interpretation: AI_ENABLED,
+      auto_analyze_uploads: AI_ENABLED && AUTO_ANALYZE_UPLOADS,
     },
   });
 });
@@ -168,7 +173,7 @@ const upload = multer({
   },
 });
 
-app.post("/upload", upload.single("file"), (req, res) => {
+app.post("/upload", upload.single("file"), async (req, res) => {
   try {
     const f = req.file;
     if (!f) {
@@ -179,40 +184,65 @@ app.post("/upload", upload.single("file"), (req, res) => {
     let project = cleanStr(req.body?.project);
     ensureDefaultProjectState();
     if (project && !projectExists(project)) project = DEFAULT_PROJECT;
+    if (!project) project = DEFAULT_PROJECT;
+
     const username = cleanStr(req.body?.username) || "Anonyme";
     const userId = cleanStr(req.body?.userId) || "";
 
-    if (project) {
-      const meta = ensureProjectMeta(project);
-      meta.latestAttachment = {
-        path: f.path,
+    const meta = ensureProjectMeta(project);
+    meta.latestAttachment = {
+      path: f.path,
+      url,
+      filename: f.originalname,
+      storedName: f.filename,
+      mimetype: cleanStr(f.mimetype) || guessMimeTypeFromExtension(f.originalname),
+      size: f.size,
+      uploadedAt: Date.now(),
+      uploadedBy: username,
+    };
+    saveJson(META_FILE, projectMeta);
+
+    const msg = makeMessage({
+      project,
+      username,
+      userId,
+      message: `📎 Fichier envoyé: ${f.originalname}`,
+      attachment: {
         url,
         filename: f.originalname,
-        storedName: f.filename,
-        mimetype: f.mimetype,
+        mimetype: meta.latestAttachment.mimetype,
         size: f.size,
-        uploadedAt: Date.now(),
-        uploadedBy: username,
-      };
-      saveJson(META_FILE, projectMeta);
+      },
+    });
+    pushMessage(project, msg);
+    io.to(project).emit("chatMessage", msg);
 
-      const msg = makeMessage({
-        project,
-        username,
-        userId,
-        message: `📎 Fichier envoyé: ${f.originalname}`,
-        attachment: {
-          url,
-          filename: f.originalname,
-          mimetype: f.mimetype,
-          size: f.size,
-        },
-      });
-      pushMessage(project, msg);
-      io.to(project).emit("chatMessage", msg);
+    if (AI_ENABLED && AUTO_ANALYZE_UPLOADS) {
+      setTimeout(async () => {
+        try {
+          const autoText = buildAutoAnalyzePromptForAttachment(meta.latestAttachment);
+          await handleAIRequest({
+            project,
+            username: AI_BOT_NAME,
+            userId: "",
+            message: autoText,
+            internal: true,
+          });
+        } catch (e) {
+          console.error("🔥 Auto analyze upload error:", e);
+          await emitBotText(project, `⚠️ Analyse automatique impossible pour ${f.originalname} : ${String(e?.message || e)}`);
+        }
+      }, AUTO_ANALYZE_DELAY_MS);
     }
 
-    return res.json({ ok: true, url, filename: f.originalname, mimetype: f.mimetype, size: f.size });
+    return res.json({
+      ok: true,
+      url,
+      filename: f.originalname,
+      mimetype: meta.latestAttachment.mimetype,
+      size: f.size,
+      auto_analyze: AI_ENABLED && AUTO_ANALYZE_UPLOADS,
+    });
   } catch (e) {
     console.error("🔥 Upload error:", e);
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
@@ -411,7 +441,7 @@ io.on("connection", (socket) => {
     io.to(p).emit("chatMessage", row);
 
     try {
-      if (shouldInvokeAI(msg)) {
+      if (shouldInvokeAI(msg) || isLikelyWebQuery(msg) || refersToLatestAttachment(msg)) {
         await handleAIRequest({ project: p, username: u, userId: uid, message: msg });
       }
     } catch (e) {
@@ -469,7 +499,8 @@ io.on("connection", (socket) => {
 function shouldInvokeAI(message) {
   const m = cleanStr(message).toLowerCase();
   if (!m) return false;
-  return (
+
+  if (
     m.startsWith("@sensi") ||
     m.startsWith("/ai") ||
     m.startsWith("/web") ||
@@ -480,10 +511,139 @@ function shouldInvokeAI(message) {
     m.startsWith("/pptx") ||
     m.startsWith("/image") ||
     m.startsWith("/help")
+  ) {
+    return true;
+  }
+
+  const naturalStarts = [
+    "sensi",
+    "hey sensi",
+    "ok sensi",
+    "bonjour sensi",
+    "salut sensi",
+    "peux-tu",
+    "tu peux",
+    "analyse",
+    "résume",
+    "resume",
+    "explique",
+    "interprète",
+    "interprete",
+    "que contient",
+    "que dit",
+    "donne-moi",
+    "fais-moi",
+    "prépare",
+    "prepare",
+    "génère",
+    "genere",
+    "cherche",
+  ];
+
+  const naturalContains = [
+    "analyse ce fichier",
+    "analyse ce document",
+    "analyse ce pdf",
+    "analyse cette image",
+    "analyse cet audio",
+    "résume ce fichier",
+    "résume ce document",
+    "resume ce document",
+    "que contient ce fichier",
+    "que contient ce document",
+    "que contient ce pdf",
+    "interprète ce fichier",
+    "interprete ce fichier",
+    "lis ce document",
+    "explique ce document",
+    "explique cette image",
+    "décris cette image",
+    "decris cette image",
+  ];
+
+  return naturalStarts.some((x) => m.startsWith(x)) || naturalContains.some((x) => m.includes(x));
+}
+
+function isLikelyWebQuery(message) {
+  const m = cleanStr(message).toLowerCase();
+  if (!m) return false;
+
+  if (m.startsWith("/web")) return true;
+
+  const keywords = [
+    "actualité",
+    "actualite",
+    "news",
+    "prix",
+    "cours",
+    "tendance",
+    "marché",
+    "marche",
+    "aujourd'hui",
+    "aujourdhui",
+    "ce matin",
+    "ce soir",
+    "en ce moment",
+    "dernier",
+    "dernière",
+    "derniere",
+    "derniers",
+    "dernières",
+    "date",
+    "heure",
+    "météo",
+    "meteo",
+    "qui est le président",
+    "qui est le president",
+    "qui est le ceo",
+    "qui dirige",
+  ];
+
+  return keywords.some((k) => m.includes(k));
+}
+
+function refersToLatestAttachment(message) {
+  const m = cleanStr(message).toLowerCase();
+  if (!m) return false;
+  const refs = [
+    "ce fichier",
+    "ce document",
+    "ce pdf",
+    "ce doc",
+    "ce docx",
+    "ce xlsx",
+    "ce pptx",
+    "cette image",
+    "cet audio",
+    "la pièce jointe",
+    "la piece jointe",
+    "le fichier envoyé",
+    "le fichier envoye",
+    "le dernier fichier",
+    "le document envoyé",
+    "le document envoye",
+  ];
+  return refs.some((x) => m.includes(x));
+}
+
+function isInterpretCommand(message) {
+  const m = cleanStr(message).toLowerCase();
+  return (
+    m === "/analyze" ||
+    m === "/analyse" ||
+    m.startsWith("/analyze ") ||
+    m.startsWith("/analyse ") ||
+    refersToLatestAttachment(m) ||
+    m.includes("analyse") ||
+    m.includes("résume") ||
+    m.includes("resume") ||
+    m.includes("interprète") ||
+    m.includes("interprete") ||
+    m.includes("que contient")
   );
 }
 
-async function handleAIRequest({ project, username, userId, message }) {
+async function handleAIRequest({ project, username, userId, message, internal = false }) {
   if (!AI_ENABLED) {
     await emitBotText(project, "🔒 IA désactivée : ajoute OPENAI_API_KEY dans Railway > Variables, puis redeploy.");
     return;
@@ -492,8 +652,9 @@ async function handleAIRequest({ project, username, userId, message }) {
   const raw = cleanStr(message);
   const lower = raw.toLowerCase();
 
-  if (lower === "/help" || lower === "@sensi /help" || lower === "@sensi help") {
-    await emitBotText(project,
+  if (lower === "/help" || lower === "@sensi /help" || lower === "@sensi help" || lower === "sensi aide" || lower === "sensi help") {
+    await emitBotText(
+      project,
       "Commandes IA :\n" +
       "• @sensi <question> : réponse IA générale\n" +
       "• /web <question> : recherche web avec sources\n" +
@@ -501,25 +662,37 @@ async function handleAIRequest({ project, username, userId, message }) {
       "• /docx <brief> : génère un Word\n" +
       "• /xlsx <brief> : génère un Excel\n" +
       "• /pptx <brief> : génère un PowerPoint\n" +
-      "• /image <brief> : génère une image PNG"
+      "• /image <brief> : génère une image PNG\n\n" +
+      "Formulations naturelles reconnues aussi :\n" +
+      "• Sensi analyse ce fichier\n" +
+      "• résume ce document\n" +
+      "• que contient cette image ?\n" +
+      "• analyse le pdf envoyé\n" +
+      "• donne-moi une synthèse du dernier fichier"
     );
     return;
   }
 
   if (lower.startsWith("/web ")) {
     const query = cleanStr(raw.slice(5));
-    const answer = await askAIWithWeb(query);
+    const answer = await askAIWithWeb(query, { project, username });
     await emitBotText(project, answer.text);
     return;
   }
 
-  if (lower === "/analyze" || lower === "/analyse" || lower.startsWith("/analyze ") || lower.startsWith("/analyse ")) {
+  if (!lower.startsWith("/web ") && isLikelyWebQuery(raw) && !refersToLatestAttachment(raw) && !lower.includes("fichier") && !lower.includes("document")) {
+    const answer = await askAIWithWeb(raw, { project, username });
+    await emitBotText(project, answer.text);
+    return;
+  }
+
+  if (isInterpretCommand(raw)) {
     const meta = ensureProjectMeta(project);
     if (!meta.latestAttachment?.path) {
-      await emitBotText(project, "📎 Aucun fichier récent à analyser dans ce projet.");
+      await emitBotText(project, "📎 Aucun fichier récent à interpréter dans ce projet.");
       return;
     }
-    const answer = await analyzeProjectFile(project, raw);
+    const answer = await analyzeProjectFile(project, raw, { internal, username, userId });
     await emitBotText(project, answer.text);
     return;
   }
@@ -552,19 +725,37 @@ async function handleAIRequest({ project, username, userId, message }) {
     return;
   }
 
-  const prompt = raw.startsWith("@sensi") ? cleanStr(raw.replace(/^@sensi\s*/i, "")) : cleanStr(raw.replace(/^\/ai\s*/i, ""));
+  const prompt = extractNaturalPrompt(raw);
   const answer = await askAIText(prompt, { project, username, userId });
   await emitBotText(project, answer.text);
 }
 
+function extractNaturalPrompt(raw) {
+  const text = cleanStr(raw);
+
+  if (/^@sensi\s+/i.test(text)) return cleanStr(text.replace(/^@sensi\s+/i, ""));
+  if (/^\/ai\s+/i.test(text)) return cleanStr(text.replace(/^\/ai\s+/i, ""));
+  if (/^sensi[:,\s-]*/i.test(text)) return cleanStr(text.replace(/^sensi[:,\s-]*/i, ""));
+  if (/^hey sensi[:,\s-]*/i.test(text)) return cleanStr(text.replace(/^hey sensi[:,\s-]*/i, ""));
+  if (/^ok sensi[:,\s-]*/i.test(text)) return cleanStr(text.replace(/^ok sensi[:,\s-]*/i, ""));
+
+  return text;
+}
+
 async function askAIText(prompt, ctx = {}) {
+  const history = buildConversationContext(ctx.project, MAX_CONTEXT_MESSAGES);
+
   const system = [
     "Tu es Sensi, une assistante professionnelle intégrée à un espace collaboratif temps réel.",
-    "Réponds en français, de manière claire, utile et opérationnelle.",
+    "Tu réponds en français, de manière claire, structurée, utile et opérationnelle.",
+    "Tu joues le rôle d'un copilot de projet : synthèse, analyse, structuration, recommandations concrètes.",
+    "Quand l'utilisateur parle d'un document, fichier, image ou audio, tu l'interprètes comme une demande de travail concrète si le contexte le permet.",
     "Quand l'utilisateur demande un livrable, structure ta réponse pour être directement exploitable.",
+    "Quand la demande semble ambiguë mais exploitable, fais une hypothèse raisonnable au lieu de bloquer.",
     `Projet courant : ${ctx.project || "inconnu"}.`,
     `Utilisateur courant : ${ctx.username || "inconnu"}.`,
-  ].join(" ");
+    history ? `Contexte récent du projet :\n${history}` : "",
+  ].filter(Boolean).join("\n");
 
   const response = await openai.responses.create({
     model: MODEL_TEXT,
@@ -575,12 +766,20 @@ async function askAIText(prompt, ctx = {}) {
   return { text: cleanStr(response.output_text) || "(aucune réponse)" };
 }
 
-async function askAIWithWeb(prompt) {
+async function askAIWithWeb(prompt, ctx = {}) {
+  const history = buildConversationContext(ctx.project, 6);
+
   const response = await openai.responses.create({
     model: MODEL_WEB,
     tools: [{ type: "web_search" }],
     include: ["web_search_call.action.sources"],
-    instructions: "Réponds en français. Cite clairement les sources pertinentes à la fin avec leur URL.",
+    instructions: [
+      "Réponds en français.",
+      "Sois factuelle, utile, concise mais exploitable.",
+      "Quand l'information est actuelle, indique explicitement qu'il s'agit d'une information web.",
+      history ? `Contexte projet utile :\n${history}` : "",
+      "Cite clairement les sources pertinentes à la fin avec leur URL.",
+    ].filter(Boolean).join("\n"),
     input: prompt,
   });
 
@@ -592,29 +791,179 @@ async function askAIWithWeb(prompt) {
   return { text };
 }
 
-async function analyzeProjectFile(project, userPrompt) {
+async function analyzeProjectFile(project, userPrompt, opts = {}) {
   const meta = ensureProjectMeta(project);
   const att = meta.latestAttachment;
+  if (!att?.path) {
+    return { text: "📎 Aucun fichier récent à analyser." };
+  }
+
+  const mimetype = cleanStr(att.mimetype).toLowerCase();
+  const ext = path.extname(att.filename || att.path || "").toLowerCase();
+
+  let resultText = "";
+
+  if (isImageMime(mimetype, ext)) {
+    resultText = await analyzeImageAttachment(att, userPrompt, project);
+  } else if (isAudioMime(mimetype, ext)) {
+    resultText = await analyzeAudioAttachment(att, userPrompt, project);
+  } else if (isTextLikeMime(mimetype, ext)) {
+    resultText = await analyzeTextLikeAttachment(att, userPrompt, project);
+  } else {
+    resultText = await analyzeBinaryDocumentAttachment(att, userPrompt, project);
+  }
+
+  meta.latestAnalysis = {
+    filename: att.filename,
+    analyzedAt: Date.now(),
+    mimetype: att.mimetype,
+    prompt: cleanStr(userPrompt),
+  };
+  saveJson(META_FILE, projectMeta);
+
+  return { text: resultText || `Analyse terminée pour ${att.filename}.` };
+}
+
+async function analyzeBinaryDocumentAttachment(att, userPrompt, project) {
   const fileId = await uploadFileToOpenAI(att.path, att.filename, att.mimetype);
+  const history = buildConversationContext(project, 6);
 
   const prompt = [
-    `Analyse le fichier \"${att.filename}\" pour un espace collaboratif.`,
-    "Donne : 1) résumé exécutif, 2) points clés, 3) risques/incohérences éventuels, 4) actions recommandées.",
-    `Consigne utilisateur complémentaire : ${userPrompt}`,
+    `Tu analyses le fichier "${att.filename}" pour un espace collaboratif.`,
+    `Type détecté : ${att.mimetype || "inconnu"}.`,
+    "Objectif : interpréter le contenu du fichier de façon concrète, utile et intelligible.",
+    "",
+    "Réponds avec cette structure :",
+    "1) Nature du document",
+    "2) Résumé exécutif",
+    "3) Points clés",
+    "4) Points sensibles / incohérences / limites",
+    "5) Recommandations ou actions suivantes",
+    "",
+    `Consigne utilisateur : ${cleanStr(userPrompt) || "Analyse complète du document."}`,
+    history ? `Contexte récent du projet :\n${history}` : "",
     "Réponds en français, de façon exploitable et professionnelle.",
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 
   const response = await openai.responses.create({
     model: MODEL_TEXT,
     input: [
-      { role: "user", content: [
-        { type: "input_text", text: prompt },
-        { type: "input_file", file_id: fileId },
-      ] },
+      {
+        role: "user",
+        content: [
+          { type: "input_text", text: prompt },
+          { type: "input_file", file_id: fileId },
+        ],
+      },
     ],
   });
 
-  return { text: cleanStr(response.output_text) || `Analyse terminée pour ${att.filename}.` };
+  return cleanStr(response.output_text) || `Analyse terminée pour ${att.filename}.`;
+}
+
+async function analyzeTextLikeAttachment(att, userPrompt, project) {
+  const fileText = readTextFileSnippet(att.path, 120000);
+  if (!fileText) {
+    return await analyzeBinaryDocumentAttachment(att, userPrompt, project);
+  }
+
+  const history = buildConversationContext(project, 6);
+  const prompt = [
+    `Tu analyses le contenu texte du fichier "${att.filename}".`,
+    `Type détecté : ${att.mimetype || "text/plain"}.`,
+    "Réponds avec cette structure :",
+    "1) Nature du contenu",
+    "2) Résumé",
+    "3) Points clés",
+    "4) Problèmes éventuels",
+    "5) Suite recommandée",
+    `Consigne utilisateur : ${cleanStr(userPrompt) || "Interprétation complète."}`,
+    history ? `Contexte récent du projet :\n${history}` : "",
+    "",
+    "Contenu du fichier :",
+    fileText,
+  ].filter(Boolean).join("\n");
+
+  const response = await openai.responses.create({
+    model: MODEL_TEXT,
+    instructions: "Réponds en français. Sois clair, structuré et utile.",
+    input: prompt,
+  });
+
+  return cleanStr(response.output_text) || `Analyse terminée pour ${att.filename}.`;
+}
+
+async function analyzeImageAttachment(att, userPrompt, project) {
+  const imageDataUrl = buildImageDataUrl(att.path, att.mimetype);
+  const history = buildConversationContext(project, 6);
+
+  const prompt = [
+    `Tu interprètes l'image "${att.filename}" pour un espace collaboratif.`,
+    "Décris ce qui est visible de manière fiable.",
+    "Ajoute ensuite une interprétation utile, sans inventer ce qui n'est pas visible.",
+    "Réponds avec :",
+    "1) Description visuelle",
+    "2) Éléments importants",
+    "3) Interprétation / ce que l'image suggère",
+    "4) Recommandations ou actions utiles",
+    `Consigne utilisateur : ${cleanStr(userPrompt) || "Analyse complète de l'image."}`,
+    history ? `Contexte récent du projet :\n${history}` : "",
+    "Réponds en français.",
+  ].filter(Boolean).join("\n");
+
+  const response = await openai.responses.create({
+    model: MODEL_TEXT,
+    input: [
+      {
+        role: "user",
+        content: [
+          { type: "input_text", text: prompt },
+          { type: "input_image", image_url: imageDataUrl },
+        ],
+      },
+    ],
+  });
+
+  return cleanStr(response.output_text) || `Analyse image terminée pour ${att.filename}.`;
+}
+
+async function analyzeAudioAttachment(att, userPrompt, project) {
+  const transcript = await openai.audio.transcriptions.create({
+    file: fs.createReadStream(att.path),
+    model: MODEL_TRANSCRIBE,
+    response_format: "json",
+    language: "fr",
+  });
+
+  const transcriptText = cleanStr(transcript?.text);
+  const history = buildConversationContext(project, 6);
+
+  if (!transcriptText) {
+    return `🎙️ Audio détecté (${att.filename}) mais transcription vide ou non exploitable.`;
+  }
+
+  const prompt = [
+    `Tu analyses un audio transcrit issu du fichier "${att.filename}".`,
+    "Réponds avec :",
+    "1) Résumé du contenu",
+    "2) Points clés",
+    "3) Informations actionnables",
+    "4) Si pertinent : décisions / prochaines étapes",
+    `Consigne utilisateur : ${cleanStr(userPrompt) || "Interprétation complète de l'audio."}`,
+    history ? `Contexte récent du projet :\n${history}` : "",
+    "",
+    "Transcription :",
+    transcriptText,
+  ].filter(Boolean).join("\n");
+
+  const response = await openai.responses.create({
+    model: MODEL_TEXT,
+    instructions: "Réponds en français. Sois utile, structurée et fiable.",
+    input: prompt,
+  });
+
+  const synthesis = cleanStr(response.output_text) || "Analyse audio terminée.";
+  return `🎙️ Transcription détectée pour ${att.filename}.\n\n${synthesis}`;
 }
 
 async function generateDocxForProject(project, brief, username) {
@@ -624,6 +973,8 @@ async function generateDocxForProject(project, brief, username) {
       "Retourne uniquement un JSON valide avec cette structure :",
       '{"title":"...","subtitle":"...","sections":[{"heading":"...","bullets":["..."],"paragraph":"..."}]}',
       "4 à 6 sections maximum. Français. Pas de markdown.",
+      `Projet : ${project}`,
+      `Utilisateur : ${username || "inconnu"}`,
       `Brief : ${brief}`,
     ].join("\n")
   );
@@ -667,7 +1018,14 @@ async function generateDocxForProject(project, brief, username) {
   const safe = `${Date.now()}_${safeFileName(title)}.docx`;
   const full = path.join(GENERATED_DIR, safe);
   fs.writeFileSync(full, buffer);
-  return buildGeneratedAttachment(project, full, `/uploads/generated/${encodeURIComponent(safe)}`, `${title}.docx`, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", username);
+  return buildGeneratedAttachment(
+    project,
+    full,
+    `/uploads/generated/${encodeURIComponent(safe)}`,
+    `${title}.docx`,
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    username
+  );
 }
 
 async function generateXlsxForProject(project, brief, username) {
@@ -677,6 +1035,8 @@ async function generateXlsxForProject(project, brief, username) {
       "Retourne uniquement un JSON valide avec cette structure :",
       '{"title":"...","columns":["Colonne 1","Colonne 2","Colonne 3"],"rows":[["...","...","..."]]}',
       "6 à 12 lignes utiles. Français. Pas de markdown.",
+      `Projet : ${project}`,
+      `Utilisateur : ${username || "inconnu"}`,
       `Brief : ${brief}`,
     ].join("\n")
   );
@@ -719,7 +1079,14 @@ async function generateXlsxForProject(project, brief, username) {
   const safe = `${Date.now()}_${safeFileName(title)}.xlsx`;
   const full = path.join(GENERATED_DIR, safe);
   await wb.xlsx.writeFile(full);
-  return buildGeneratedAttachment(project, full, `/uploads/generated/${encodeURIComponent(safe)}`, `${title}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", username);
+  return buildGeneratedAttachment(
+    project,
+    full,
+    `/uploads/generated/${encodeURIComponent(safe)}`,
+    `${title}.xlsx`,
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    username
+  );
 }
 
 async function generatePptxForProject(project, brief, username) {
@@ -729,6 +1096,8 @@ async function generatePptxForProject(project, brief, username) {
       "Retourne uniquement un JSON valide avec cette structure :",
       '{"title":"...","slides":[{"title":"...","bullets":["...","..."]}]}',
       "4 à 6 slides maximum, 3 à 5 bullets par slide. Français. Pas de markdown.",
+      `Projet : ${project}`,
+      `Utilisateur : ${username || "inconnu"}`,
       `Brief : ${brief}`,
     ].join("\n")
   );
@@ -745,14 +1114,23 @@ async function generatePptxForProject(project, brief, username) {
   const first = pptx.addSlide();
   first.addText(title, { x: 0.6, y: 0.8, w: 11.4, h: 0.8, fontSize: 24, bold: true, color: "1F2937" });
   first.addText(`Projet : ${project}`, { x: 0.6, y: 1.7, w: 7.5, h: 0.4, fontSize: 12, color: "4B5563" });
-  first.addShape(pptx.ShapeType.rect, { x: 0.6, y: 2.2, w: 5.2, h: 0.12, line: { color: "7C3AED", pt: 1 }, fill: { color: "7C3AED" } });
+  first.addShape(pptx.ShapeType.rect, {
+    x: 0.6,
+    y: 2.2,
+    w: 5.2,
+    h: 0.12,
+    line: { color: "7C3AED", pt: 1 },
+    fill: { color: "7C3AED" },
+  });
 
   const slides = Array.isArray(spec.slides) ? spec.slides : [];
   for (const slideSpec of slides) {
     const slide = pptx.addSlide();
     slide.background = { color: "F8FAFC" };
     slide.addText(cleanStr(slideSpec?.title) || "Slide", { x: 0.6, y: 0.5, w: 11.2, h: 0.6, fontSize: 22, bold: true, color: "111827" });
-    const bullets = Array.isArray(slideSpec?.bullets) ? slideSpec.bullets.map((b) => ({ text: cleanStr(b) || "•" })) : [{ text: "Contenu à compléter" }];
+    const bullets = Array.isArray(slideSpec?.bullets)
+      ? slideSpec.bullets.map((b) => ({ text: cleanStr(b) || "•" }))
+      : [{ text: "Contenu à compléter" }];
     slide.addText(bullets, {
       x: 0.9,
       y: 1.4,
@@ -769,7 +1147,14 @@ async function generatePptxForProject(project, brief, username) {
   const safe = `${Date.now()}_${safeFileName(title)}.pptx`;
   const full = path.join(GENERATED_DIR, safe);
   await pptx.writeFile({ fileName: full });
-  return buildGeneratedAttachment(project, full, `/uploads/generated/${encodeURIComponent(safe)}`, `${title}.pptx`, "application/vnd.openxmlformats-officedocument.presentationml.presentation", username);
+  return buildGeneratedAttachment(
+    project,
+    full,
+    `/uploads/generated/${encodeURIComponent(safe)}`,
+    `${title}.pptx`,
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    username
+  );
 }
 
 async function generateImageForProject(project, brief, username) {
@@ -907,7 +1292,7 @@ function ensureDir(dir) {
 }
 
 function isValidProjectName(name) {
-  return /^[a-zA-Z0-9 _\.\-]{2,50}$/.test(cleanStr(name));
+  return /^[a-zA-Z0-9 _.\-]{2,50}$/.test(cleanStr(name));
 }
 
 function loadJson(file, fallback) {
@@ -993,6 +1378,103 @@ function thinBorder() {
   };
 }
 
+function parseBooleanEnv(value, defaultValue = false) {
+  const v = cleanStr(value).toLowerCase();
+  if (!v) return defaultValue;
+  return ["1", "true", "yes", "on", "oui"].includes(v);
+}
+
+function buildConversationContext(project, limit = 8) {
+  const arr = Array.isArray(messagesByProject[project]) ? messagesByProject[project] : [];
+  const slice = arr.slice(-Math.max(0, limit));
+  return slice
+    .map((m) => {
+      const u = cleanStr(m?.username) || "Anonyme";
+      const txt = cleanStr(m?.message);
+      if (!txt) return "";
+      return `${u}: ${truncate(txt, 500)}`;
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function truncate(str, max = 4000) {
+  const s = cleanStr(str);
+  if (s.length <= max) return s;
+  return s.slice(0, max) + "\n[…truncated]";
+}
+
+function readTextFileSnippet(filePath, maxChars = 120000) {
+  try {
+    const content = fs.readFileSync(filePath, "utf8");
+    return truncate(content, maxChars);
+  } catch {
+    return "";
+  }
+}
+
+function buildImageDataUrl(filePath, mimetype) {
+  const mime = cleanStr(mimetype) || guessMimeTypeFromExtension(filePath) || "image/png";
+  const base64 = fs.readFileSync(filePath).toString("base64");
+  return `data:${mime};base64,${base64}`;
+}
+
+function guessMimeTypeFromExtension(fileName) {
+  const ext = path.extname(fileName || "").toLowerCase();
+  const map = {
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".json": "application/json",
+    ".csv": "text/csv",
+    ".html": "text/html",
+    ".xml": "application/xml",
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".m4a": "audio/mp4",
+    ".ogg": "audio/ogg",
+    ".webm": "audio/webm",
+  };
+  return map[ext] || "application/octet-stream";
+}
+
+function isImageMime(mimetype, ext) {
+  return String(mimetype || "").startsWith("image/") || [".png", ".jpg", ".jpeg", ".webp", ".gif"].includes(ext);
+}
+
+function isAudioMime(mimetype, ext) {
+  return String(mimetype || "").startsWith("audio/") || [".mp3", ".wav", ".m4a", ".ogg", ".webm"].includes(ext);
+}
+
+function isTextLikeMime(mimetype, ext) {
+  if (String(mimetype || "").startsWith("text/")) return true;
+  return [".txt", ".md", ".json", ".csv", ".xml", ".html"].includes(ext);
+}
+
+function buildAutoAnalyzePromptForAttachment(att) {
+  const mimetype = cleanStr(att?.mimetype).toLowerCase();
+  const ext = path.extname(att?.filename || "").toLowerCase();
+
+  if (isImageMime(mimetype, ext)) {
+    return "Sensi analyse cette image envoyée et fais une interprétation utile.";
+  }
+  if (isAudioMime(mimetype, ext)) {
+    return "Sensi analyse cet audio envoyé, transcris-le si possible puis résume-le.";
+  }
+  if (isTextLikeMime(mimetype, ext)) {
+    return "Sensi interprète ce fichier texte envoyé et fais une synthèse claire.";
+  }
+  return "Sensi analyse ce document envoyé et fais une synthèse exploitable.";
+}
+
 // =========================
 // Listen
 // =========================
@@ -1001,6 +1483,7 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on", PORT);
   console.log("Version:", VERSION);
   console.log("AI:", AI_ENABLED ? `enabled (${MODEL_TEXT})` : "disabled");
+  console.log("Auto analyze uploads:", AI_ENABLED ? String(AUTO_ANALYZE_UPLOADS) : "false");
 });
 
 // =========================
@@ -1028,5 +1511,4 @@ function shutdown(signal) {
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("unhandledRejection", (e) => console.error("💥 unhandledRejection:", e));
-process.on("uncaughtException", (e) => console.error("💥 uncaughtException:", e));
 process.on("uncaughtException", (e) => console.error("💥 uncaughtException:", e));

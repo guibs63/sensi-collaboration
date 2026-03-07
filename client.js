@@ -1,8 +1,11 @@
-// guibs:/client.js (COMPLET) — ULTRA v3.5.1 CLIENT — global room + socket ready queue ✅
+// guibs:/client.js (COMPLET) — ULTRA v3.6.0 CLIENT — intuitive Sensi UX + global room + socket ready queue ✅
 // VOICE fix: "over / au revoir" = triggers d’envoi, mais JAMAIS ajoutés au texte final.
-// Patch v3.4.5a (minimal):
-// - joinProject(): set currentProject/currentUsername AVANT renderPresence([])
-// - joinProject(): garde-fou si socket pas prêt
+// Ajouts v3.6.0 :
+// - barre d’actions Sensi (analyse, résumé, web, docx/xlsx/pptx/image)
+// - health check serveur + état IA lisible
+// - meilleur retour upload / auto-analyse
+// - prompts naturels prêts à l’emploi
+// - UX plus intuitive sans casser la logique existante
 "use strict";
 
 /* ======================================================
@@ -50,7 +53,14 @@ const currentProjectLabel = document.getElementById("current-project-label");
 // index.html sépare désormais l'état /health et l'état socket.
 const statusText = document.getElementById("status-text");
 const socketStatusHost = document.getElementById("socket-status-host") || statusText;
+
 let socketStatusSpan = null;
+let healthStatusSpan = null;
+let aiStatusSpan = null;
+let sensiBar = null;
+let sensiHint = null;
+let sensiQuickInput = null;
+let sensiLastHealth = null;
 
 (function assertDom() {
   const required = [
@@ -83,10 +93,50 @@ function ensureSocketStatusSlot() {
   return socketStatusSpan;
 }
 
+function ensureHealthStatusSlot() {
+  if (!socketStatusHost) return null;
+  if (healthStatusSpan && healthStatusSpan.isConnected) return healthStatusSpan;
+
+  healthStatusSpan = document.createElement("span");
+  healthStatusSpan.id = "health-status";
+  healthStatusSpan.style.marginLeft = "10px";
+  healthStatusSpan.style.fontFamily = "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
+  healthStatusSpan.style.fontSize = "12px";
+  healthStatusSpan.textContent = "health: …";
+  socketStatusHost.appendChild(healthStatusSpan);
+  return healthStatusSpan;
+}
+
+function ensureAiStatusSlot() {
+  if (!socketStatusHost) return null;
+  if (aiStatusSpan && aiStatusSpan.isConnected) return aiStatusSpan;
+
+  aiStatusSpan = document.createElement("span");
+  aiStatusSpan.id = "ai-status";
+  aiStatusSpan.style.marginLeft = "10px";
+  aiStatusSpan.style.fontFamily = "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
+  aiStatusSpan.style.fontSize = "12px";
+  aiStatusSpan.textContent = "ai: …";
+  socketStatusHost.appendChild(aiStatusSpan);
+  return aiStatusSpan;
+}
+
 function setSocketStatus(txt) {
   const slot = ensureSocketStatusSlot();
   if (!slot) return;
   slot.textContent = `socket: ${String(txt || "")}`;
+}
+
+function setHealthStatus(txt) {
+  const slot = ensureHealthStatusSlot();
+  if (!slot) return;
+  slot.textContent = `health: ${String(txt || "")}`;
+}
+
+function setAiStatus(txt) {
+  const slot = ensureAiStatusSlot();
+  if (!slot) return;
+  slot.textContent = `ai: ${String(txt || "")}`;
 }
 
 /* ======================================================
@@ -98,6 +148,7 @@ const AUTO_JOIN = false;
 const LS_USER_ID = "sensi_user_id";
 const LS_LAST_USERNAME = "sensi_last_username";
 const LS_LAST_PROJECT = "sensi_last_project";
+const LS_LAST_HEALTH = "sensi_last_health";
 
 function getOrCreateUserId() {
   try {
@@ -122,6 +173,8 @@ let currentUsername = null;
 let socket = null;
 let socketReady = false;
 let pendingJoinRequested = false;
+let lastUploadedFileInfo = null;
+let lastDetectedAiEnabled = null;
 
 function setSocketUiReady(ready, detail = "") {
   socketReady = Boolean(ready);
@@ -137,12 +190,13 @@ function setSocketUiReady(ready, detail = "") {
   }
 
   refreshDeleteProjectState();
+  refreshSensiBarState(detail);
 }
 
 function queueJoinUntilSocketReady() {
   pendingJoinRequested = true;
   setSocketUiReady(false, "Socket en cours d'initialisation...");
-  addSystem('⏳ Socket en cours de chargement... la connexion au projet partira automatiquement dès qu\'il sera prêt.');
+  addSystem("⏳ Socket en cours de chargement... la connexion au projet partira automatiquement dès qu'il sera prêt.");
 }
 
 function flushPendingJoinIfNeeded() {
@@ -192,7 +246,9 @@ function formatTime(ts) {
     if (!ts) return "";
     const d = new Date(ts);
     return d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
-  } catch { return ""; }
+  } catch {
+    return "";
+  }
 }
 
 function setProjectLabel(p) {
@@ -214,6 +270,389 @@ function addSystem(text) {
   chat.scrollTop = chat.scrollHeight;
 }
 
+function setUploadState(text) {
+  if (!uploadState) return;
+  uploadState.textContent = cleanStr(text);
+}
+
+function detectIsSensiMessage(username) {
+  return cleanStr(username).toLowerCase() === "sensi";
+}
+
+function insertTextAtCursor(el, text) {
+  if (!el) return;
+  const value = String(el.value || "");
+  const start = typeof el.selectionStart === "number" ? el.selectionStart : value.length;
+  const end = typeof el.selectionEnd === "number" ? el.selectionEnd : value.length;
+  const before = value.slice(0, start);
+  const after = value.slice(end);
+  el.value = before + text + after;
+  const pos = start + text.length;
+  try {
+    el.setSelectionRange(pos, pos);
+  } catch {}
+  el.focus();
+}
+
+function putPromptInInput(text, opts = {}) {
+  const replace = Boolean(opts.replace);
+  const prompt = cleanStr(text);
+  if (!prompt) return;
+  if (replace || !cleanStr(input.value)) {
+    input.value = prompt;
+  } else {
+    const cur = cleanStr(input.value);
+    input.value = cur ? `${cur} ${prompt}` : prompt;
+  }
+  input.focus();
+}
+
+function sendAssistantPrompt(text) {
+  const prompt = cleanStr(text);
+  if (!prompt) return;
+  sendTextMessage(prompt);
+}
+
+function inferNaturalAnalyzePrompt() {
+  if (lastUploadedFileInfo?.filename) {
+    const mime = String(lastUploadedFileInfo.mimetype || "");
+    if (mime.startsWith("image/")) return "Sensi analyse cette image envoyée";
+    if (mime.startsWith("audio/")) return "Sensi analyse cet audio envoyé et fais une synthèse";
+    return "Sensi analyse ce fichier envoyé";
+  }
+  return "Sensi analyse le dernier fichier du projet";
+}
+
+function inferNaturalSummaryPrompt() {
+  if (lastUploadedFileInfo?.filename) {
+    return "Sensi résume ce document envoyé";
+  }
+  return "Sensi fais une synthèse de la discussion récente";
+}
+
+function inferNaturalWebPrompt() {
+  return "Sensi cherche sur le web les dernières infos utiles sur ";
+}
+
+function inferNaturalDocxPrompt() {
+  return "/docx brief à compléter";
+}
+
+function inferNaturalXlsxPrompt() {
+  return "/xlsx brief à compléter";
+}
+
+function inferNaturalPptxPrompt() {
+  return "/pptx brief à compléter";
+}
+
+function inferNaturalImagePrompt() {
+  return "/image brief à compléter";
+}
+
+/* ======================================================
+   Sensi bar / copilot UX
+   ====================================================== */
+
+function ensureSensiBar() {
+  if (sensiBar || !form || !form.parentNode) return;
+
+  sensiBar = document.createElement("div");
+  sensiBar.id = "sensi-bar";
+  sensiBar.style.cssText = [
+    "display:flex",
+    "flex-direction:column",
+    "gap:8px",
+    "margin:10px 0 0",
+    "padding:10px",
+    "border:1px solid #e8e8e8",
+    "border-radius:12px",
+    "background:#fafafa",
+  ].join(";");
+
+  const top = document.createElement("div");
+  top.style.cssText = "display:flex;flex-wrap:wrap;gap:8px;align-items:center;";
+
+  const title = document.createElement("strong");
+  title.textContent = "✨ Sensi";
+  title.style.cssText = "font-size:14px;";
+
+  sensiHint = document.createElement("span");
+  sensiHint.style.cssText = "font-size:12px;color:#666;";
+  sensiHint.textContent = "Copilot prêt.";
+
+  top.appendChild(title);
+  top.appendChild(sensiHint);
+
+  const actions = document.createElement("div");
+  actions.style.cssText = "display:flex;flex-wrap:wrap;gap:8px;align-items:center;";
+
+  const buttons = [
+    { label: "Analyser fichier", action: "analyze-latest" },
+    { label: "Résumer", action: "summarize" },
+    { label: "Web", action: "web" },
+    { label: "Word", action: "docx" },
+    { label: "Excel", action: "xlsx" },
+    { label: "PPT", action: "pptx" },
+    { label: "Image", action: "image" },
+    { label: "Aide", action: "help" },
+  ];
+
+  for (const item of buttons) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = item.label;
+    btn.dataset.sensiAction = item.action;
+    btn.style.cssText = [
+      "border:1px solid #ddd",
+      "background:white",
+      "border-radius:999px",
+      "padding:6px 10px",
+      "cursor:pointer",
+      "font-size:12px",
+    ].join(";");
+    actions.appendChild(btn);
+  }
+
+  const quick = document.createElement("div");
+  quick.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap;";
+
+  sensiQuickInput = document.createElement("input");
+  sensiQuickInput.type = "text";
+  sensiQuickInput.placeholder = "Prompt rapide Sensi…";
+  sensiQuickInput.style.cssText = [
+    "flex:1",
+    "min-width:240px",
+    "border:1px solid #ddd",
+    "border-radius:10px",
+    "padding:8px 10px",
+    "font-size:13px",
+  ].join(";");
+
+  const fillBtn = document.createElement("button");
+  fillBtn.type = "button";
+  fillBtn.textContent = "Mettre dans le message";
+  fillBtn.dataset.sensiAction = "fill-input";
+  fillBtn.style.cssText = [
+    "border:1px solid #ddd",
+    "background:white",
+    "border-radius:10px",
+    "padding:8px 10px",
+    "cursor:pointer",
+    "font-size:12px",
+  ].join(";");
+
+  const sendBtn = document.createElement("button");
+  sendBtn.type = "button";
+  sendBtn.textContent = "Envoyer à Sensi";
+  sendBtn.dataset.sensiAction = "send-quick";
+  sendBtn.style.cssText = [
+    "border:1px solid #d8c8ff",
+    "background:#f7f2ff",
+    "border-radius:10px",
+    "padding:8px 10px",
+    "cursor:pointer",
+    "font-size:12px",
+  ].join(";");
+
+  quick.appendChild(sensiQuickInput);
+  quick.appendChild(fillBtn);
+  quick.appendChild(sendBtn);
+
+  const examples = document.createElement("div");
+  examples.style.cssText = "display:flex;flex-wrap:wrap;gap:8px;align-items:center;";
+
+  const chips = [
+    "Sensi analyse ce fichier envoyé",
+    "Sensi résume ce document",
+    "Sensi fais une synthèse de la discussion",
+    "Sensi cherche sur le web les dernières infos sur EverCell",
+  ];
+
+  for (const txt of chips) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.dataset.sensiChip = txt;
+    chip.textContent = txt;
+    chip.style.cssText = [
+      "border:1px dashed #ddd",
+      "background:#fff",
+      "border-radius:999px",
+      "padding:5px 9px",
+      "cursor:pointer",
+      "font-size:11px",
+      "color:#555",
+    ].join(";");
+    examples.appendChild(chip);
+  }
+
+  sensiBar.appendChild(top);
+  sensiBar.appendChild(actions);
+  sensiBar.appendChild(quick);
+  sensiBar.appendChild(examples);
+
+  form.parentNode.insertBefore(sensiBar, form);
+
+  sensiBar.addEventListener("click", (e) => {
+    const actionBtn = e.target?.closest?.("[data-sensi-action]");
+    const chipBtn = e.target?.closest?.("[data-sensi-chip]");
+
+    if (chipBtn) {
+      putPromptInInput(chipBtn.getAttribute("data-sensi-chip"), { replace: true });
+      return;
+    }
+
+    if (!actionBtn) return;
+    const action = cleanStr(actionBtn.getAttribute("data-sensi-action"));
+
+    if (action === "analyze-latest") {
+      putPromptInInput(inferNaturalAnalyzePrompt(), { replace: true });
+      return;
+    }
+
+    if (action === "summarize") {
+      putPromptInInput(inferNaturalSummaryPrompt(), { replace: true });
+      return;
+    }
+
+    if (action === "web") {
+      putPromptInInput(inferNaturalWebPrompt(), { replace: true });
+      return;
+    }
+
+    if (action === "docx") {
+      putPromptInInput(inferNaturalDocxPrompt(), { replace: true });
+      return;
+    }
+
+    if (action === "xlsx") {
+      putPromptInInput(inferNaturalXlsxPrompt(), { replace: true });
+      return;
+    }
+
+    if (action === "pptx") {
+      putPromptInInput(inferNaturalPptxPrompt(), { replace: true });
+      return;
+    }
+
+    if (action === "image") {
+      putPromptInInput(inferNaturalImagePrompt(), { replace: true });
+      return;
+    }
+
+    if (action === "help") {
+      sendAssistantPrompt("/help");
+      return;
+    }
+
+    if (action === "fill-input") {
+      const txt = cleanStr(sensiQuickInput?.value);
+      if (!txt) return;
+      putPromptInInput(txt, { replace: true });
+      return;
+    }
+
+    if (action === "send-quick") {
+      const txt = cleanStr(sensiQuickInput?.value);
+      if (!txt) return;
+      sendAssistantPrompt(txt);
+      sensiQuickInput.value = "";
+    }
+  });
+
+  sensiQuickInput?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const txt = cleanStr(sensiQuickInput.value);
+      if (!txt) return;
+      sendAssistantPrompt(txt);
+      sensiQuickInput.value = "";
+    }
+  });
+
+  refreshSensiBarState();
+}
+
+function refreshSensiBarState(detail = "") {
+  ensureSensiBar();
+  if (!sensiHint) return;
+
+  if (!socketReady) {
+    sensiHint.textContent = detail || "Copilot en attente du socket.";
+    return;
+  }
+
+  if (!cleanStr(currentProject)) {
+    sensiHint.textContent = "Choisis puis rejoins un projet pour utiliser Sensi.";
+    return;
+  }
+
+  if (lastDetectedAiEnabled === false) {
+    sensiHint.textContent = "Serveur OK mais IA désactivée côté backend.";
+    return;
+  }
+
+  if (lastUploadedFileInfo?.filename) {
+    sensiHint.textContent = `Dernier fichier: ${lastUploadedFileInfo.filename}`;
+    return;
+  }
+
+  sensiHint.textContent = `Projet courant: ${currentProject}`;
+}
+
+/* ======================================================
+   Health check
+   ====================================================== */
+
+async function refreshHealth() {
+  try {
+    const res = await fetch("/health", { cache: "no-store" });
+    const data = await res.json().catch(() => ({}));
+    sensiLastHealth = data || null;
+
+    try { localStorage.setItem(LS_LAST_HEALTH, JSON.stringify(data || {})); } catch {}
+
+    if (!res.ok || !data?.ok) {
+      setHealthStatus("error");
+      setAiStatus("unknown");
+      lastDetectedAiEnabled = null;
+      refreshSensiBarState("Serveur /health indisponible.");
+      return;
+    }
+
+    const version = cleanStr(data.version || "unknown");
+    const ai = cleanStr(data.ai || "");
+    const model = cleanStr(data.ai_model_text || "");
+    const autoAnalyze = Boolean(data?.features?.file_analysis);
+
+    setHealthStatus(`ok (${version})`);
+    setAiStatus(ai === "enabled" ? `enabled (${model || "model?"})` : "disabled");
+
+    lastDetectedAiEnabled = ai === "enabled";
+
+    if (uploadState && autoAnalyze && cleanStr(uploadState.textContent) === "") {
+      // no-op volontaire
+    }
+
+    refreshSensiBarState();
+  } catch {
+    setHealthStatus("offline?");
+    setAiStatus("unknown");
+    lastDetectedAiEnabled = null;
+    refreshSensiBarState("Impossible de lire /health.");
+  }
+}
+
+function restoreLastHealthHint() {
+  try {
+    const raw = localStorage.getItem(LS_LAST_HEALTH);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    if (data?.version) setHealthStatus(`cached (${data.version})`);
+    if (data?.ai) setAiStatus(`cached (${data.ai})`);
+  } catch {}
+}
+
 /* ======================================================
    Messages rendering + delete support
    ====================================================== */
@@ -228,12 +667,30 @@ function renderAttachment(att) {
   const isImg = String(att.mimetype || "").startsWith("image/");
   const isAudio = String(att.mimetype || "").startsWith("audio/");
 
+  const actionButtons = `
+    <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">
+      <button type="button"
+        data-ai-quick="analyze-latest"
+        title="Demander à Sensi d’analyser le dernier fichier"
+        style="border:1px solid #ddd;background:#fff;border-radius:999px;padding:4px 8px;cursor:pointer;font-size:11px;">
+        ✨ Analyser
+      </button>
+      <button type="button"
+        data-ai-quick="summarize-latest"
+        title="Demander un résumé du dernier fichier"
+        style="border:1px solid #ddd;background:#fff;border-radius:999px;padding:4px 8px;cursor:pointer;font-size:11px;">
+        📝 Résumer
+      </button>
+    </div>
+  `;
+
   if (isImg) {
     return `
       <div style="margin-top:6px;">
         <a href="${url}" target="_blank" rel="noopener">🖼️ ${name}</a><br/>
         <img src="${url}" alt="${name}"
              style="max-width:260px; border:1px solid #ddd; border-radius:10px; margin-top:6px;" />
+        ${actionButtons}
       </div>
     `;
   }
@@ -245,11 +702,17 @@ function renderAttachment(att) {
         <div style="margin-top:6px;">
           <audio controls preload="none" src="${url}" style="width:260px;"></audio>
         </div>
+        ${actionButtons}
       </div>
     `;
   }
 
-  return `<div style="margin-top:6px;"><a href="${url}" target="_blank" rel="noopener">📄 ${name}</a></div>`;
+  return `
+    <div style="margin-top:6px;">
+      <a href="${url}" target="_blank" rel="noopener">📄 ${name}</a>
+      ${actionButtons}
+    </div>
+  `;
 }
 
 function addMessage({ id, ts, username, userId, message, attachment }) {
@@ -263,12 +726,13 @@ function addMessage({ id, ts, username, userId, message, attachment }) {
   if (Number.isFinite(mid)) row.dataset.mid = String(mid);
 
   const canDelete = cleanStr(userId) && cleanStr(userId) === cleanStr(myUserId);
+  const isSensi = detectIsSensiMessage(username);
 
   row.innerHTML = `
     <div class="msg-main" style="display:flex; gap:10px; align-items:flex-start;">
       <div style="flex:1;">
         <span class="time">${time ? `[${time}]` : ""}</span>
-        <strong>${escapeHtml(username)}:</strong>
+        <strong>${isSensi ? "✨ " : ""}${escapeHtml(username)}:</strong>
         <span class="text">${renderRichText(message)}</span>
         ${attachment ? renderAttachment(attachment) : ""}
       </div>
@@ -298,25 +762,39 @@ function removeMessageNode(messageId) {
   seenMessageIds.delete(mid);
 }
 
-// delegate delete clicks
+// delegate delete clicks + AI quick actions
 chat.addEventListener("click", (e) => {
-  const btn = e.target?.closest?.("button[data-del='1']");
-  if (!btn) return;
-  const mid = Number(btn.getAttribute("data-mid"));
-  if (!Number.isFinite(mid)) return;
-  if (!currentProject) return;
+  const delBtn = e.target?.closest?.("button[data-del='1']");
+  if (delBtn) {
+    const mid = Number(delBtn.getAttribute("data-mid"));
+    if (!Number.isFinite(mid)) return;
+    if (!currentProject) return;
 
-  const ok = confirm("Supprimer ce message ?");
-  if (!ok) return;
+    const ok = confirm("Supprimer ce message ?");
+    if (!ok) return;
 
-  if (!socket) return alert("Socket non prêt.");
-  socket.emit("deleteMessage", { project: currentProject, messageId: mid }, (resp) => {
-    if (!resp?.ok) {
-      alert("Suppression impossible: " + (resp?.error || "unknown"));
-      return;
-    }
-    removeMessageNode(mid);
-  });
+    if (!socket) return alert("Socket non prêt.");
+    socket.emit("deleteMessage", { project: currentProject, messageId: mid }, (resp) => {
+      if (!resp?.ok) {
+        alert("Suppression impossible: " + (resp?.error || "unknown"));
+        return;
+      }
+      removeMessageNode(mid);
+    });
+    return;
+  }
+
+  const aiBtn = e.target?.closest?.("[data-ai-quick]");
+  if (!aiBtn) return;
+
+  const action = cleanStr(aiBtn.getAttribute("data-ai-quick"));
+  if (action === "analyze-latest") {
+    sendAssistantPrompt(inferNaturalAnalyzePrompt());
+    return;
+  }
+  if (action === "summarize-latest") {
+    sendAssistantPrompt("Sensi résume ce fichier envoyé");
+  }
 });
 
 /* ======================================================
@@ -533,7 +1011,9 @@ async function transcribeAudioBlob(blob) {
 function isSupportedMime(mime) {
   try {
     return !!(window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(mime));
-  } catch { return false; }
+  } catch {
+    return false;
+  }
 }
 function pickAudioMime() {
   if (isSupportedMime(AUDIO_MIME_PREFERRED)) return AUDIO_MIME_PREFERRED;
@@ -644,17 +1124,19 @@ function ensureVoiceUI() {
     try {
       if (!recBlob) return;
       btnSendRec.disabled = true;
-      if (uploadState) uploadState.textContent = "Upload audio…";
+      setUploadState("Upload audio…");
       const ext = guessExtFromMime(recBlob.type) || "webm";
       const file = new File([recBlob], `audio_${Date.now()}.${ext}`, { type: recBlob.type || "audio/webm" });
-      await uploadFile(file);
+      const data = await uploadFile(file);
       recBlob = null;
-      if (uploadState) uploadState.textContent = "Audio envoyé ✅";
-      setTimeout(() => { if (uploadState) uploadState.textContent = ""; }, 2000);
+      lastUploadedFileInfo = data || null;
+      setUploadState(data?.auto_analyze ? "Audio envoyé ✅ analyse automatique en cours…" : "Audio envoyé ✅");
+      setTimeout(() => { setUploadState(""); }, 2500);
+      refreshSensiBarState();
     } catch (e) {
       console.error(e);
       alert(`Erreur upload audio: ${e?.message || e}`);
-      if (uploadState) uploadState.textContent = "";
+      setUploadState("");
     } finally {
       btnSendRec.disabled = !recBlob;
       updateVoiceUiGate();
@@ -904,7 +1386,7 @@ async function startListening() {
 function stopListening() {
   isListening = false;
   setVoiceButtonState();
-  if (voiceHint) voiceHint.textContent = `⏸️ Écoute stoppée.`;
+  if (voiceHint) voiceHint.textContent = "⏸️ Écoute stoppée.";
 
   try { recognition && recognition.stop(); } catch {}
   recognition = null;
@@ -993,16 +1475,24 @@ form.addEventListener("submit", async (e) => {
 
   try {
     if (file) {
-      if (uploadState) uploadState.textContent = `Upload "${file.name}"...`;
+      setUploadState(`Upload "${file.name}"...`);
       if (submitBtn) submitBtn.disabled = true;
 
-      await uploadFile(file);
+      const data = await uploadFile(file);
+      lastUploadedFileInfo = {
+        filename: cleanStr(data?.filename || file.name),
+        mimetype: cleanStr(data?.mimetype || file.type),
+        size: Number(data?.size || file.size || 0),
+        url: cleanStr(data?.url),
+        auto_analyze: Boolean(data?.auto_analyze),
+      };
 
-      if (uploadState) uploadState.textContent = "Upload OK ✅";
+      setUploadState(data?.auto_analyze ? "Upload OK ✅ analyse automatique en cours…" : "Upload OK ✅");
       if (fileInput) fileInput.value = "";
       input.value = "";
       input.focus();
-      setTimeout(() => { if (uploadState) uploadState.textContent = ""; }, 2000);
+      refreshSensiBarState();
+      setTimeout(() => { setUploadState(""); }, 2500);
       return;
     }
 
@@ -1014,7 +1504,7 @@ form.addEventListener("submit", async (e) => {
   } catch (err) {
     console.error(err);
     alert(`Erreur: ${err?.message || err}`);
-    if (uploadState) uploadState.textContent = "";
+    setUploadState("");
   } finally {
     if (submitBtn) submitBtn.disabled = false;
   }
@@ -1061,12 +1551,19 @@ function joinProject(options = {}) {
   socket.emit("getProjects");
 
   updateVoiceUiGate();
+  refreshSensiBarState();
 }
 
 joinBtn.addEventListener("click", joinProject);
 usernameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") joinProject(); });
-usernameInput.addEventListener("input", () => updateVoiceUiGate());
-projectSelect.addEventListener("change", () => refreshDeleteProjectState());
+usernameInput.addEventListener("input", () => {
+  updateVoiceUiGate();
+  refreshSensiBarState();
+});
+projectSelect.addEventListener("change", () => {
+  refreshDeleteProjectState();
+  refreshSensiBarState();
+});
 refreshDeleteProjectState();
 
 function isValidProjectName(name) {
@@ -1092,6 +1589,7 @@ if (createProjectBtn && newProjectInput) {
 
       refreshDeleteProjectState();
       addSystem(`✅ Projet créé: "${resp.project}"`);
+      refreshSensiBarState();
     });
   };
 
@@ -1146,11 +1644,13 @@ async function loadProjectsOnce() {
 
     refreshDeleteProjectState();
     updateVoiceUiGate();
+    refreshSensiBarState();
     return;
   } catch (_) {}
 
   setProjectsOptions([DEFAULT_PROJECT], true);
   refreshDeleteProjectState();
+  refreshSensiBarState();
   if (socket) socket.emit("getProjects");
 }
 
@@ -1186,10 +1686,12 @@ async function initSocket() {
     setSocketUiReady(true);
     flushPendingJoinIfNeeded();
   });
+
   socket.on("disconnect", () => {
     setSocketStatus("disconnected");
     setSocketUiReady(false, "Socket déconnecté... reconnexion en cours.");
   });
+
   socket.on("connect_error", (err) => {
     setSocketStatus(`error (${err?.message || "?"})`);
     setSocketUiReady(false, "Erreur de connexion socket");
@@ -1204,14 +1706,41 @@ async function initSocket() {
     if (msgs.length === 0) return addSystem(`Historique vide pour "${currentProject}".`);
     addSystem(`Historique chargé pour "${currentProject}" (${msgs.length} message(s)).`);
 
-    for (const m of msgs) addMessage(m);
+    for (const m of msgs) {
+      addMessage(m);
+      if (m?.attachment?.filename) {
+        lastUploadedFileInfo = {
+          filename: cleanStr(m.attachment.filename),
+          mimetype: cleanStr(m.attachment.mimetype),
+          size: Number(m.attachment.size || 0),
+          url: cleanStr(m.attachment.url),
+        };
+      }
+    }
+    refreshSensiBarState();
   });
 
   socket.on("chatMessage", (data) => {
     if (!currentProject) return;
     const p = cleanStr(data?.project);
     if (p && p !== currentProject) return;
+
     addMessage(data);
+
+    if (data?.attachment?.filename) {
+      lastUploadedFileInfo = {
+        filename: cleanStr(data.attachment.filename),
+        mimetype: cleanStr(data.attachment.mimetype),
+        size: Number(data.attachment.size || 0),
+        url: cleanStr(data.attachment.url),
+      };
+      refreshSensiBarState();
+    }
+
+    if (detectIsSensiMessage(data?.username)) {
+      setUploadState("");
+      refreshSensiBarState();
+    }
   });
 
   socket.on("systemMessage", (msg) => {
@@ -1250,6 +1779,7 @@ async function initSocket() {
     }
 
     updateVoiceUiGate();
+    refreshSensiBarState();
   });
 
   socket.on("projectDeleted", ({ project }) => {
@@ -1263,6 +1793,7 @@ async function initSocket() {
       renderPresence([]);
       pendingJoinRequested = true;
       flushPendingJoinIfNeeded();
+      refreshSensiBarState();
     }
   });
 
@@ -1284,10 +1815,11 @@ async function initSocket() {
 }
 
 /* ======================================================
-   INIT VOICE BAR
+   INIT VOICE BAR + SENSI BAR
    ====================================================== */
 
 setSocketUiReady(false, "Chargement du socket...");
+restoreLastHealthHint();
 
 (function initVoice() {
   if (!ENABLE_VOICE) return;
@@ -1295,14 +1827,23 @@ setSocketUiReady(false, "Chargement du socket...");
   updateVoiceUiGate();
 })();
 
+(function initSensi() {
+  ensureSensiBar();
+  refreshSensiBarState();
+})();
+
 /* ======================================================
    CLEANUP (optional leaveProject)
    ====================================================== */
 
-
 // Bootstrap minimal client startup
 setProjectsOptions([DEFAULT_PROJECT], false);
 setProjectLabel(DEFAULT_PROJECT);
+
+refreshHealth().catch(() => {});
+setInterval(() => {
+  refreshHealth().catch(() => {});
+}, 20000);
 
 initSocket().catch((err) => {
   console.error("initSocket failed", err);
