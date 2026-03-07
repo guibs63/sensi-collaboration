@@ -1,4 +1,5 @@
-// guibs:/client.js (COMPLET) — ULTRA v3.4.5 CLIENT — Presence FIX ✅
+
+// guibs:/client.js (COMPLET) — ULTRA v3.5.1 CLIENT — global room + socket ready queue ✅
 // VOICE fix: "over / au revoir" = triggers d’envoi, mais JAMAIS ajoutés au texte final.
 // Patch v3.4.5a (minimal):
 // - joinProject(): set currentProject/currentUsername AVANT renderPresence([])
@@ -24,7 +25,6 @@ async function waitForIo() {
 }
 
 function cleanStr(v) { return String(v ?? "").trim(); }
-const DEFAULT_PROJECT = "global";
 
 /* ======================================================
    DOM
@@ -48,8 +48,9 @@ const usersList = document.getElementById("users");
 const usersCount = document.getElementById("users-count");
 const currentProjectLabel = document.getElementById("current-project-label");
 
-// index.html utilise #status-text pour /health. On évite d’écraser : on ajoute un sous-status socket.
+// index.html sépare désormais l'état /health et l'état socket.
 const statusText = document.getElementById("status-text");
+const socketStatusHost = document.getElementById("socket-status-host") || statusText;
 let socketStatusSpan = null;
 
 (function assertDom() {
@@ -70,16 +71,16 @@ let socketStatusSpan = null;
 })();
 
 function ensureSocketStatusSlot() {
-  if (!statusText) return null;
-  if (socketStatusSpan) return socketStatusSpan;
+  if (!socketStatusHost) return null;
+  if (socketStatusSpan && socketStatusSpan.isConnected) return socketStatusSpan;
 
   socketStatusSpan = document.createElement("span");
   socketStatusSpan.id = "socket-status";
   socketStatusSpan.style.marginLeft = "10px";
   socketStatusSpan.style.fontFamily = "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
   socketStatusSpan.style.fontSize = "12px";
-  socketStatusSpan.textContent = "socket: …";
-  statusText.appendChild(socketStatusSpan);
+  socketStatusSpan.textContent = "socket: démarrage…";
+  socketStatusHost.appendChild(socketStatusSpan);
   return socketStatusSpan;
 }
 
@@ -115,9 +116,41 @@ function getOrCreateUserId() {
 }
 
 const myUserId = getOrCreateUserId();
+const DEFAULT_PROJECT = "global";
 
 let currentProject = null;
 let currentUsername = null;
+let socket = null;
+let socketReady = false;
+let pendingJoinRequested = false;
+
+function setSocketUiReady(ready, detail = "") {
+  socketReady = Boolean(ready);
+
+  if (joinBtn) {
+    joinBtn.disabled = !socketReady;
+    joinBtn.title = socketReady ? "Rejoindre le projet sélectionné" : (detail || "Chargement du socket...");
+  }
+
+  if (createProjectBtn) {
+    createProjectBtn.disabled = !socketReady;
+    createProjectBtn.title = socketReady ? "Créer un nouveau projet" : (detail || "Chargement du socket...");
+  }
+
+  refreshDeleteProjectState();
+}
+
+function queueJoinUntilSocketReady() {
+  pendingJoinRequested = true;
+  setSocketUiReady(false, "Socket en cours d'initialisation...");
+  addSystem('⏳ Socket en cours de chargement... la connexion au projet partira automatiquement dès qu\'il sera prêt.');
+}
+
+function flushPendingJoinIfNeeded() {
+  if (!pendingJoinRequested || !socket || !socket.connected) return;
+  pendingJoinRequested = false;
+  setTimeout(() => joinProject({ silentIfPending: true }), 50);
+}
 
 function saveLastSession() {
   try {
@@ -291,59 +324,57 @@ chat.addEventListener("click", (e) => {
    Projects list
    ====================================================== */
 
-function normalizeProjectsList(projects) {
-  const seen = new Set();
-  const normalized = [DEFAULT_PROJECT];
-
-  for (const raw of (projects || [])) {
-    const name = cleanStr(raw);
-    if (!name) continue;
-    if (name === DEFAULT_PROJECT) continue;
-    if (seen.has(name)) continue;
-    seen.add(name);
-    normalized.push(name);
-  }
-
-  return normalized;
+function getProjectListFromSelect() {
+  return Array.from(projectSelect?.options || []).map((o) => cleanStr(o.value)).filter(Boolean);
 }
 
-function syncProjectDeleteState(projects) {
-  if (!deleteProjectBtn) return;
-  const list = normalizeProjectsList(projects);
-  const selected = cleanStr(projectSelect?.value) || DEFAULT_PROJECT;
-  const isGlobal = selected === DEFAULT_PROJECT;
-  const isLastProject = list.length <= 1;
+function refreshDeleteProjectState() {
+  if (!deleteProjectBtn || !projectSelect) return;
 
-  deleteProjectBtn.disabled = isGlobal || isLastProject;
-  deleteProjectBtn.title = isGlobal
-    ? 'Le projet "global" est protégé et ne peut pas être supprimé.'
-    : isLastProject
-      ? "Impossible de supprimer le dernier projet restant."
-      : "";
+  const selected = cleanStr(projectSelect.value);
+  const list = getProjectListFromSelect();
+  const protectedProject = !selected || selected === DEFAULT_PROJECT || list.length <= 1;
+  const blocked = !socketReady || protectedProject;
+
+  deleteProjectBtn.disabled = blocked;
+  if (!socketReady) {
+    deleteProjectBtn.title = "Chargement du socket...";
+    return;
+  }
+
+  deleteProjectBtn.title = protectedProject
+    ? 'Le projet "global" et le dernier projet restant ne peuvent pas être supprimés.'
+    : "Supprimer le projet sélectionné";
 }
 
 function setProjectsOptions(projects, keepSelection = true) {
-  const list = normalizeProjectsList(projects);
   const prev = keepSelection ? cleanStr(projectSelect.value) : "";
+  const normalized = [];
+  for (const p of (projects || [])) {
+    const name = cleanStr(p);
+    if (name && !normalized.includes(name)) normalized.push(name);
+  }
+  if (!normalized.includes(DEFAULT_PROJECT)) normalized.unshift(DEFAULT_PROJECT);
+
   projectSelect.innerHTML = "";
 
-  for (const name of list) {
+  for (const name of normalized) {
     const opt = document.createElement("option");
     opt.value = name;
-    opt.textContent = name === DEFAULT_PROJECT ? `${name} (par défaut)` : name;
+    opt.textContent = name;
     projectSelect.appendChild(opt);
   }
 
   if (keepSelection && prev) {
-    const exists = Array.from(projectSelect.options).some((o) => o.value === prev);
+    const exists = normalized.includes(prev);
     if (exists) projectSelect.value = prev;
   }
 
   if (!projectSelect.value && projectSelect.options.length > 0) {
-    projectSelect.value = DEFAULT_PROJECT;
+    projectSelect.value = projectSelect.options[0].value;
   }
 
-  syncProjectDeleteState(list);
+  refreshDeleteProjectState();
 }
 
 /* ======================================================
@@ -994,25 +1025,34 @@ form.addEventListener("submit", async (e) => {
    JOIN / CREATE / DELETE project
    ====================================================== */
 
-function joinProject() {
+function joinProject(options = {}) {
   const username = cleanStr(usernameInput.value);
   const project = cleanStr(projectSelect.value) || DEFAULT_PROJECT;
+  const silentIfPending = Boolean(options?.silentIfPending);
 
   if (!username) return alert("Entre un pseudo 🙂");
   if (!project) return alert("Aucun projet disponible.");
 
-  if (!socket) return alert("Socket non prêt (chargement en cours).");
-  if (!socket.connected) addSystem("⏳ Socket pas encore connecté… on tente quand même.");
-
   currentUsername = username;
   currentProject = project;
   saveLastSession();
+  setProjectLabel(currentProject);
+
+  if (!socket || !socketReady) {
+    if (!silentIfPending) queueJoinUntilSocketReady();
+    return;
+  }
+
+  if (!socket.connected) {
+    pendingJoinRequested = true;
+    if (!silentIfPending) addSystem("⏳ Socket pas encore connecté... la connexion sera rejouée automatiquement.");
+    return;
+  }
+
+  pendingJoinRequested = false;
 
   // ✅ reset presence UI AFTER setting currentProject/currentUsername
   renderPresence([]);
-
-  setProjectLabel(currentProject);
-  syncProjectDeleteState(Array.from(projectSelect.options).map((o) => o.value));
   clearChat();
   addSystem(`Connexion au projet "${currentProject}"...`);
 
@@ -1027,6 +1067,8 @@ function joinProject() {
 joinBtn.addEventListener("click", joinProject);
 usernameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") joinProject(); });
 usernameInput.addEventListener("input", () => updateVoiceUiGate());
+projectSelect.addEventListener("change", () => refreshDeleteProjectState());
+refreshDeleteProjectState();
 
 function isValidProjectName(name) {
   return /^[a-zA-Z0-9 _.\-]{2,50}$/.test(cleanStr(name));
@@ -1037,6 +1079,7 @@ if (createProjectBtn && newProjectInput) {
     const name = cleanStr(nameRaw);
     if (!name) return;
     if (!isValidProjectName(name)) return alert("Nom invalide (2-50, lettres/chiffres/espaces/_-.)");
+    if (!socket || !socketReady) return alert("Socket en cours de chargement... réessaie dans un instant.");
 
     socket.emit("createProject", { name }, (resp) => {
       if (!resp || resp.ok !== true) {
@@ -1044,10 +1087,11 @@ if (createProjectBtn && newProjectInput) {
         return;
       }
 
-      const list = normalizeProjectsList(Array.isArray(resp.projects) ? resp.projects : []);
+      const list = Array.isArray(resp.projects) ? resp.projects : [];
       if (list.length > 0) setProjectsOptions(list, false);
       if (resp.project) projectSelect.value = resp.project;
 
+      refreshDeleteProjectState();
       addSystem(`✅ Projet créé: "${resp.project}"`);
     });
   };
@@ -1069,36 +1113,14 @@ if (createProjectBtn && newProjectInput) {
 
 if (deleteProjectBtn) {
   deleteProjectBtn.addEventListener("click", () => {
-    const list = normalizeProjectsList(Array.from(projectSelect.options).map((o) => o.value));
-    const p = cleanStr(projectSelect.value) || DEFAULT_PROJECT;
-
-    if (p === DEFAULT_PROJECT) {
-      alert('Le projet "global" est protégé et ne peut pas être supprimé.');
-      syncProjectDeleteState(list);
-      return;
-    }
-
-    if (list.length <= 1) {
-      alert("Impossible de supprimer : il doit rester au moins un projet.");
-      syncProjectDeleteState(list);
-      return;
-    }
-
-    const ok = confirm(`Supprimer le projet "${p}" ?
-
-⚠️ Cela supprime aussi son historique de messages.`);
+    const p = cleanStr(projectSelect.value);
+    if (!p) return;
+    const ok = confirm(`Supprimer le projet "${p}" ?\n\n⚠️ Cela supprime aussi son historique de messages.`);
     if (!ok) return;
-
+    if (!socket || !socketReady) return alert("Socket en cours de chargement... réessaie dans un instant.");
     socket.emit("deleteProject", { project: p }, (resp) => {
-      if (!resp?.ok) {
-        alert(resp?.message || resp?.error || "Suppression impossible.");
-        syncProjectDeleteState(list);
-      }
+      if (resp?.ok !== true) alert(resp?.message || "Suppression impossible.");
     });
-  });
-
-  projectSelect.addEventListener("change", () => {
-    syncProjectDeleteState(Array.from(projectSelect.options).map((o) => o.value));
   });
 }
 
@@ -1108,7 +1130,6 @@ if (deleteProjectBtn) {
 
 const last = restoreLastSession();
 let projectsLoadedOnce = false;
-setProjectsOptions([DEFAULT_PROJECT], false);
 
 async function loadProjectsOnce() {
   if (projectsLoadedOnce) return;
@@ -1118,32 +1139,34 @@ async function loadProjectsOnce() {
     const res = await fetch("/projects", { cache: "no-store" });
     const data = await res.json().catch(() => ({}));
 
-    const list = normalizeProjectsList(Array.isArray(data) ? data : Array.isArray(data?.projects) ? data.projects : []);
-    if (list.length > 0) {
-      setProjectsOptions(list, true);
-      const want = cleanStr(last?.p);
-      if (want && list.includes(want)) projectSelect.value = want;
-      updateVoiceUiGate();
-      return;
-    }
+    const list = Array.isArray(data) ? data : Array.isArray(data?.projects) ? data.projects : [];
+    setProjectsOptions(list, true);
+
+    const want = cleanStr(last?.p);
+    if (want && getProjectListFromSelect().includes(want)) projectSelect.value = want;
+
+    refreshDeleteProjectState();
+    updateVoiceUiGate();
+    return;
   } catch (_) {}
 
   setProjectsOptions([DEFAULT_PROJECT], true);
-  socket.emit("getProjects");
+  refreshDeleteProjectState();
+  if (socket) socket.emit("getProjects");
 }
 
 /* ======================================================
    SOCKET + EVENTS (initialized after io ready)
    ====================================================== */
 
-let socket = null;
-
 async function initSocket() {
+  setSocketUiReady(false, "Chargement du socket...");
   setSocketStatus("connecting…");
 
   const ioFn = await waitForIo();
   if (!ioFn) {
     setSocketStatus("ERROR (io not loaded)");
+    setSocketUiReady(false, "Socket.IO indisponible");
     alert("Socket.IO n’a pas pu se charger (io is undefined). Vérifie /socket.io/socket.io.js ou le CDN.");
     return null;
   }
@@ -1159,9 +1182,19 @@ async function initSocket() {
 
   window.socket = socket;
 
-  socket.on("connect", () => setSocketStatus(`connected (${socket.id})`));
-  socket.on("disconnect", () => setSocketStatus("disconnected"));
-  socket.on("connect_error", (err) => setSocketStatus(`error (${err?.message || "?"})`));
+  socket.on("connect", () => {
+    setSocketStatus(`connected (${socket.id})`);
+    setSocketUiReady(true);
+    flushPendingJoinIfNeeded();
+  });
+  socket.on("disconnect", () => {
+    setSocketStatus("disconnected");
+    setSocketUiReady(false, "Socket déconnecté... reconnexion en cours.");
+  });
+  socket.on("connect_error", (err) => {
+    setSocketStatus(`error (${err?.message || "?"})`);
+    setSocketUiReady(false, "Erreur de connexion socket");
+  });
 
   socket.on("chatHistory", (payload) => {
     const p = cleanStr(payload?.project);
@@ -1203,52 +1236,35 @@ async function initSocket() {
   });
 
   socket.on("projectsUpdate", (payload) => {
-    const list = normalizeProjectsList(Array.isArray(payload?.projects) ? payload.projects : []);
+    const list = Array.isArray(payload?.projects) ? payload.projects : [];
     setProjectsOptions(list, true);
 
     const want = cleanStr(localStorage.getItem(LS_LAST_PROJECT));
-    if (want && list.includes(want)) {
-      projectSelect.value = want;
-    } else {
-      projectSelect.value = DEFAULT_PROJECT;
-    }
+    if (want && list.includes(want)) projectSelect.value = want;
 
     if (currentProject && !list.includes(currentProject)) {
-      const previous = currentProject;
       currentProject = null;
       setProjectLabel("—");
       clearChat();
+      addSystem("Le projet courant a été supprimé. Choisis un autre projet puis Rejoindre.");
       renderPresence([]);
-      addSystem(`Le projet "${previous}" n'existe plus. Bascule sur "global".`);
-      projectSelect.value = DEFAULT_PROJECT;
-
-      const username = cleanStr(usernameInput.value);
-      if (username && socket?.connected) {
-        joinProject();
-      }
     }
 
-    syncProjectDeleteState(list);
     updateVoiceUiGate();
   });
 
   socket.on("projectDeleted", ({ project }) => {
     const p = cleanStr(project);
     if (currentProject && p === currentProject) {
-      currentProject = null;
-      setProjectLabel("—");
-      clearChat();
-      renderPresence([]);
+      currentProject = DEFAULT_PROJECT;
       projectSelect.value = DEFAULT_PROJECT;
-      addSystem(`Le projet "${p}" a été supprimé. Retour sur "global".`);
-
-      const username = cleanStr(usernameInput.value);
-      if (username && socket?.connected) {
-        joinProject();
-      }
+      setProjectLabel(DEFAULT_PROJECT);
+      clearChat();
+      addSystem(`Le projet "${p}" a été supprimé. Bascule automatique vers "${DEFAULT_PROJECT}".`);
+      renderPresence([]);
+      pendingJoinRequested = true;
+      flushPendingJoinIfNeeded();
     }
-
-    syncProjectDeleteState(Array.from(projectSelect.options).map((o) => o.value));
   });
 
   socket.on("projectError", (payload) => alert(payload?.message || "Erreur projet"));
@@ -1272,14 +1288,14 @@ async function initSocket() {
    INIT VOICE BAR
    ====================================================== */
 
+setSocketUiReady(false, "Chargement du socket...");
+
 (function initVoice() {
   if (!ENABLE_VOICE) return;
   ensureVoiceUI();
-  syncProjectDeleteState(Array.from(projectSelect.options).map((o) => o.value));
   updateVoiceUiGate();
 })();
 
 /* ======================================================
    CLEANUP (optional leaveProject)
    ====================================================== */
-

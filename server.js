@@ -1,7 +1,8 @@
 
 
 
-// guibs:/server.js (COMPLET) — ULTRA v3.5.0 — AI + web search + file analysis + office generation ✅
+
+// guibs:/server.js (COMPLET) — ULTRA v3.5.1 — protected global room + socket client local ✅
 // Base stable Railway/Socket + IA OpenAI (Responses API) + transcription + génération docx/xlsx/pptx/png
 
 "use strict";
@@ -38,6 +39,7 @@ const INDEX_HTML = path.join(ROOT, "index.html");
 const PROJECTS_FILE = path.join(STORAGE_DIR, "projects.json");
 const MESSAGES_FILE = path.join(STORAGE_DIR, "messages.json");
 const META_FILE = path.join(STORAGE_DIR, "project-meta.json");
+const DEFAULT_PROJECT = "global";
  
 ensureDir(STORAGE_DIR);
 ensureDir(UPLOADS_DIR);
@@ -49,7 +51,7 @@ app.use(express.static(ROOT, { fallthrough: true }));
 // =========================
 // AI config
 // =========================
-const VERSION = "ultra-v3.5.0-ai-workspace";
+const VERSION = "ultra-v3.5.1-ai-workspace-safe-rooms";
 const OPENAI_API_KEY = cleanStr(process.env.OPENAI_API_KEY);
 const AI_ENABLED = Boolean(OPENAI_API_KEY);
 const MODEL_TEXT = cleanStr(process.env.OPENAI_MODEL_TEXT) || "gpt-4.1-mini";
@@ -59,37 +61,33 @@ const MODEL_TRANSCRIBE = cleanStr(process.env.OPENAI_MODEL_TRANSCRIBE) || "gpt-4
 const AI_BOT_NAME = cleanStr(process.env.AI_BOT_NAME) || "Sensi";
  
 const openai = AI_ENABLED ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
-const DEFAULT_PROJECT = "global";
  
 // =========================
 // Persistence
 // =========================
-let messagesByProject = loadJson(MESSAGES_FILE, {});
-let projectMeta = loadJson(META_FILE, {}); // { [project]: { latestAttachment, lastGenerated } }
-
-function normalizeProjectsList(list) {
-  const seen = new Set();
-  const normalized = [DEFAULT_PROJECT];
-
-  for (const raw of Array.isArray(list) ? list : []) {
-    const name = cleanStr(raw);
-    if (!name || name === DEFAULT_PROJECT || seen.has(name)) continue;
-    seen.add(name);
-    normalized.push(name);
+function normalizeProjects(list) {
+  const src = Array.isArray(list) ? list : [];
+  const cleaned = [];
+  for (const item of src) {
+    const p = cleanStr(item);
+    if (p && !cleaned.includes(p)) cleaned.push(p);
   }
-
-  return normalized;
+  if (!cleaned.includes(DEFAULT_PROJECT)) cleaned.unshift(DEFAULT_PROJECT);
+  return cleaned;
 }
 
-let projects = normalizeProjectsList(loadJson(PROJECTS_FILE, [DEFAULT_PROJECT, "Evercell"]));
+let projects = normalizeProjects(loadJson(PROJECTS_FILE, [DEFAULT_PROJECT]));
+let messagesByProject = loadJson(MESSAGES_FILE, {});
+let projectMeta = loadJson(META_FILE, {}); // { [project]: { latestAttachment, lastGenerated } }
 let nextId = computeNextId(messagesByProject);
- 
+
 function saveAll() {
+  projects = normalizeProjects(projects);
   saveJson(PROJECTS_FILE, projects);
   saveJson(MESSAGES_FILE, messagesByProject);
   saveJson(META_FILE, projectMeta);
 }
- 
+
 function ensureProjectMeta(project) {
   if (!projectMeta[project]) {
     projectMeta[project] = {
@@ -100,26 +98,17 @@ function ensureProjectMeta(project) {
   return projectMeta[project];
 }
 
-function ensureProjectExists(project) {
-  const p = cleanStr(project) || DEFAULT_PROJECT;
-
-  projects = normalizeProjectsList(projects);
-  if (!projects.includes(p)) {
-    projects.push(p);
-    projects = normalizeProjectsList(projects);
+function ensureDefaultProject() {
+  projects = normalizeProjects(projects);
+  if (!Array.isArray(messagesByProject[DEFAULT_PROJECT])) {
+    messagesByProject[DEFAULT_PROJECT] = [];
   }
-
-  if (!Array.isArray(messagesByProject[p])) {
-    messagesByProject[p] = [];
-  }
-
-  ensureProjectMeta(p);
-  return p;
+  ensureProjectMeta(DEFAULT_PROJECT);
 }
 
-ensureProjectExists(DEFAULT_PROJECT);
+ensureDefaultProject();
 saveAll();
- 
+
 // =========================
 // Health
 // =========================
@@ -144,7 +133,8 @@ app.get("/health", (_req, res) => {
 // /projects
 // =========================
 app.get("/projects", (_req, res) => {
-  projects = normalizeProjectsList(projects);
+  ensureDefaultProject();
+  saveAll();
   res.json({ ok: true, projects });
 });
  
@@ -259,7 +249,7 @@ const io = new Server(server, {
   maxHttpBufferSize: 10 * 1024 * 1024,
   connectTimeout: 45000,
   allowEIO3: false,
-  serveClient: false,
+  serveClient: true,
 });
  
 // =========================
@@ -303,7 +293,6 @@ io.on("connection", (socket) => {
   console.log("🔌 connected", socket.id);
  
   socket.on("getProjects", () => {
-    projects = normalizeProjectsList(projects);
     socket.emit("projectsUpdate", { projects });
   });
  
@@ -314,11 +303,12 @@ io.on("connection", (socket) => {
       if (typeof ack === "function") ack(resp);
       return;
     }
-
-    ensureProjectExists(DEFAULT_PROJECT);
-    ensureProjectExists(p);
-    saveAll();
-
+ 
+    if (!projects.includes(p)) {
+      projects.push(p);
+      ensureProjectMeta(p);
+      saveAll();
+    }
     io.emit("projectsUpdate", { projects });
     const resp = { ok: true, project: p, projects };
     if (typeof ack === "function") ack(resp);
@@ -326,69 +316,63 @@ io.on("connection", (socket) => {
  
   socket.on("deleteProject", ({ project } = {}, ack) => {
     const p = cleanStr(project);
-    ensureProjectExists(DEFAULT_PROJECT);
-
     if (!p) {
-      if (typeof ack === "function") ack({ ok: false, error: "bad_request", message: "Projet invalide." });
+      if (typeof ack === "function") ack({ ok: false, error: "bad_request", message: "Projet manquant." });
       return;
     }
-
     if (p === DEFAULT_PROJECT) {
-      if (typeof ack === "function") ack({ ok: false, error: "protected_project", message: 'Le projet "global" est protégé et ne peut pas être supprimé.' });
+      if (typeof ack === "function") ack({ ok: false, error: "protected_project", message: 'Impossible de supprimer le projet "global".' });
       return;
     }
-
-    if (!projects.includes(p)) {
-      if (typeof ack === "function") ack({ ok: false, error: "not_found", message: "Projet introuvable." });
-      return;
-    }
-
     if (projects.length <= 1) {
       if (typeof ack === "function") ack({ ok: false, error: "last_project", message: "Impossible de supprimer le dernier projet restant." });
       return;
     }
-
-    projects = normalizeProjectsList(projects.filter((x) => x !== p));
+    if (!projects.includes(p)) {
+      if (typeof ack === "function") ack({ ok: false, error: "not_found", message: "Projet introuvable." });
+      return;
+    }
+ 
+    projects = projects.filter((x) => x !== p);
     delete messagesByProject[p];
     delete projectMeta[p];
+    ensureDefaultProject();
     saveAll();
-
+ 
     io.to(p).emit("projectDeleted", { project: p, fallbackProject: DEFAULT_PROJECT });
     presenceByProject.delete(p);
     io.emit("projectsUpdate", { projects });
     io.to(p).emit("presenceUpdate", { project: p, users: [] });
-
-    if (typeof ack === "function") ack({ ok: true, project: p, fallbackProject: DEFAULT_PROJECT, projects });
+ 
+    if (typeof ack === "function") ack({ ok: true, project: p, projects });
   });
  
   socket.on("joinProject", ({ username, project, userId } = {}) => {
-    const requested = cleanStr(project) || DEFAULT_PROJECT;
+    ensureDefaultProject();
+    const requested = cleanStr(project);
     const p = projects.includes(requested) ? requested : DEFAULT_PROJECT;
     const u = cleanStr(username) || "Anonyme";
     const uid = cleanStr(userId) || "";
-
-    ensureProjectExists(DEFAULT_PROJECT);
-    ensureProjectExists(p);
-
+    if (!p) return;
+ 
     const prev = socket.data.project;
     if (prev && prev !== p) {
       try { socket.leave(prev); } catch {}
       presenceLeave(socket, prev);
     }
-
+ 
     socket.data.project = p;
     socket.data.username = u;
     socket.data.userId = uid;
     socket.join(p);
-
+ 
     const hist = Array.isArray(messagesByProject[p]) ? messagesByProject[p] : [];
     socket.emit("chatHistory", { project: p, messages: hist });
+    if (requested && requested !== p) {
+      socket.emit("systemMessage", { project: p, text: `ℹ️ Projet introuvable. Bascule automatique vers "${DEFAULT_PROJECT}".` });
+    }
     io.to(p).emit("systemMessage", { project: p, text: `👋 ${u} a rejoint le projet.` });
     presenceJoin(socket, p, u, uid);
-
-    if (requested !== p) {
-      socket.emit("projectError", { message: `Projet introuvable. Bascule automatique vers "${p}".` });
-    }
   });
  
   socket.on("leaveProject", () => {
