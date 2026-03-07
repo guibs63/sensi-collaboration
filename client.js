@@ -1,3 +1,4 @@
+
 // guibs:/client.js (COMPLET) — ULTRA v3.4.5 CLIENT — Presence FIX ✅
 // VOICE fix: "over / au revoir" = triggers d’envoi, mais JAMAIS ajoutés au texte final.
 // Patch v3.4.5a (minimal):

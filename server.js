@@ -1,6 +1,7 @@
 
 
 
+
 // guibs:/server.js (COMPLET) — ULTRA v3.5.0 — AI + web search + file analysis + office generation ✅
 // Base stable Railway/Socket + IA OpenAI (Responses API) + transcription + génération docx/xlsx/pptx/png
 
@@ -63,7 +64,8 @@ const openai = AI_ENABLED ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 // =========================
 // Persistence
 // =========================
-let projects = loadJson(PROJECTS_FILE, ["test", "Evercell"]);
+let projects = loadJson(PROJECTS_FILE, ["global"]);
+if (!Array.isArray(projects) || projects.length === 0) { projects = ["global"]; saveJson(PROJECTS_FILE, projects); }
 let messagesByProject = loadJson(MESSAGES_FILE, {});
 let projectMeta = loadJson(META_FILE, {}); // { [project]: { latestAttachment, lastGenerated } }
 let nextId = computeNextId(messagesByProject);
@@ -293,6 +295,7 @@ io.on("connection", (socket) => {
       return;
     }
  
+    if (projects.length <= 1) { if (typeof ack === "function") ack({ ok:false, error:"cannot_delete_last_project", message:"Impossible de supprimer : il doit rester au moins un projet."}); return; }
     projects = projects.filter((x) => x !== p);
     delete messagesByProject[p];
     delete projectMeta[p];
