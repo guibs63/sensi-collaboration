@@ -59,26 +59,30 @@ const MODEL_TRANSCRIBE = cleanStr(process.env.OPENAI_MODEL_TRANSCRIBE) || "gpt-4
 const AI_BOT_NAME = cleanStr(process.env.AI_BOT_NAME) || "Sensi";
  
 const openai = AI_ENABLED ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
+const DEFAULT_PROJECT = "global";
  
 // =========================
 // Persistence
 // =========================
-let projects = normalizeProjects(loadJson(PROJECTS_FILE, ["global"]));
 let messagesByProject = loadJson(MESSAGES_FILE, {});
 let projectMeta = loadJson(META_FILE, {}); // { [project]: { latestAttachment, lastGenerated } }
-let nextId = computeNextId(messagesByProject);
- 
-function normalizeProjects(input) {
-  const arr = Array.isArray(input) ? input.map((x) => cleanStr(x)).filter(Boolean) : [];
-  const uniq = [...new Set(arr)];
-  return uniq.length ? uniq : ["global"];
+
+function normalizeProjectsList(list) {
+  const seen = new Set();
+  const normalized = [DEFAULT_PROJECT];
+
+  for (const raw of Array.isArray(list) ? list : []) {
+    const name = cleanStr(raw);
+    if (!name || name === DEFAULT_PROJECT || seen.has(name)) continue;
+    seen.add(name);
+    normalized.push(name);
+  }
+
+  return normalized;
 }
 
-function ensureProjectsInvariant() {
-  projects = normalizeProjects(projects);
-  saveJson(PROJECTS_FILE, projects);
-  return projects;
-}
+let projects = normalizeProjectsList(loadJson(PROJECTS_FILE, [DEFAULT_PROJECT, "Evercell"]));
+let nextId = computeNextId(messagesByProject);
  
 function saveAll() {
   saveJson(PROJECTS_FILE, projects);
@@ -95,6 +99,26 @@ function ensureProjectMeta(project) {
   }
   return projectMeta[project];
 }
+
+function ensureProjectExists(project) {
+  const p = cleanStr(project) || DEFAULT_PROJECT;
+
+  projects = normalizeProjectsList(projects);
+  if (!projects.includes(p)) {
+    projects.push(p);
+    projects = normalizeProjectsList(projects);
+  }
+
+  if (!Array.isArray(messagesByProject[p])) {
+    messagesByProject[p] = [];
+  }
+
+  ensureProjectMeta(p);
+  return p;
+}
+
+ensureProjectExists(DEFAULT_PROJECT);
+saveAll();
  
 // =========================
 // Health
@@ -120,7 +144,8 @@ app.get("/health", (_req, res) => {
 // /projects
 // =========================
 app.get("/projects", (_req, res) => {
-  res.json({ ok: true, projects: ensureProjectsInvariant() });
+  projects = normalizeProjectsList(projects);
+  res.json({ ok: true, projects });
 });
  
 // =========================
@@ -152,12 +177,6 @@ app.post("/upload", upload.single("file"), (req, res) => {
     const userId = cleanStr(req.body?.userId) || "";
  
     if (project) {
-      ensureProjectsInvariant();
-      if (!projects.includes(project)) {
-        projects.push(project);
-        ensureProjectsInvariant();
-        io.emit("projectsUpdate", { projects });
-      }
       const meta = ensureProjectMeta(project);
       meta.latestAttachment = {
         path: f.path,
@@ -284,7 +303,8 @@ io.on("connection", (socket) => {
   console.log("🔌 connected", socket.id);
  
   socket.on("getProjects", () => {
-    socket.emit("projectsUpdate", { projects: ensureProjectsInvariant() });
+    projects = normalizeProjectsList(projects);
+    socket.emit("projectsUpdate", { projects });
   });
  
   socket.on("createProject", ({ name } = {}, ack) => {
@@ -294,11 +314,11 @@ io.on("connection", (socket) => {
       if (typeof ack === "function") ack(resp);
       return;
     }
- 
-    if (!projects.includes(p)) {
-      projects.push(p);
-      ensureProjectsInvariant();
-    }
+
+    ensureProjectExists(DEFAULT_PROJECT);
+    ensureProjectExists(p);
+    saveAll();
+
     io.emit("projectsUpdate", { projects });
     const resp = { ok: true, project: p, projects };
     if (typeof ack === "function") ack(resp);
@@ -306,12 +326,17 @@ io.on("connection", (socket) => {
  
   socket.on("deleteProject", ({ project } = {}, ack) => {
     const p = cleanStr(project);
+    ensureProjectExists(DEFAULT_PROJECT);
+
     if (!p) {
-      if (typeof ack === "function") ack({ ok: false, error: "bad_request" });
+      if (typeof ack === "function") ack({ ok: false, error: "bad_request", message: "Projet invalide." });
       return;
     }
 
-    ensureProjectsInvariant();
+    if (p === DEFAULT_PROJECT) {
+      if (typeof ack === "function") ack({ ok: false, error: "protected_project", message: 'Le projet "global" est protégé et ne peut pas être supprimé.' });
+      return;
+    }
 
     if (!projects.includes(p)) {
       if (typeof ack === "function") ack({ ok: false, error: "not_found", message: "Projet introuvable." });
@@ -319,55 +344,51 @@ io.on("connection", (socket) => {
     }
 
     if (projects.length <= 1) {
-      const resp = { ok: false, error: "last_project", message: "Impossible de supprimer : il doit rester au moins un projet." };
-      socket.emit("projectError", resp);
-      if (typeof ack === "function") ack(resp);
+      if (typeof ack === "function") ack({ ok: false, error: "last_project", message: "Impossible de supprimer le dernier projet restant." });
       return;
     }
 
-    projects = projects.filter((x) => x !== p);
-    ensureProjectsInvariant();
+    projects = normalizeProjectsList(projects.filter((x) => x !== p));
     delete messagesByProject[p];
     delete projectMeta[p];
-    saveJson(MESSAGES_FILE, messagesByProject);
-    saveJson(META_FILE, projectMeta);
+    saveAll();
 
-    io.to(p).emit("projectDeleted", { project: p });
+    io.to(p).emit("projectDeleted", { project: p, fallbackProject: DEFAULT_PROJECT });
     presenceByProject.delete(p);
     io.emit("projectsUpdate", { projects });
     io.to(p).emit("presenceUpdate", { project: p, users: [] });
 
-    if (typeof ack === "function") ack({ ok: true, project: p, projects });
+    if (typeof ack === "function") ack({ ok: true, project: p, fallbackProject: DEFAULT_PROJECT, projects });
   });
  
   socket.on("joinProject", ({ username, project, userId } = {}) => {
-    const p = cleanStr(project);
+    const requested = cleanStr(project) || DEFAULT_PROJECT;
+    const p = projects.includes(requested) ? requested : DEFAULT_PROJECT;
     const u = cleanStr(username) || "Anonyme";
     const uid = cleanStr(userId) || "";
-    if (!p) return;
 
-    ensureProjectsInvariant();
-    if (!projects.includes(p)) {
-      projects.push(p);
-      ensureProjectsInvariant();
-      io.emit("projectsUpdate", { projects });
-    }
- 
+    ensureProjectExists(DEFAULT_PROJECT);
+    ensureProjectExists(p);
+
     const prev = socket.data.project;
     if (prev && prev !== p) {
       try { socket.leave(prev); } catch {}
       presenceLeave(socket, prev);
     }
- 
+
     socket.data.project = p;
     socket.data.username = u;
     socket.data.userId = uid;
     socket.join(p);
- 
+
     const hist = Array.isArray(messagesByProject[p]) ? messagesByProject[p] : [];
     socket.emit("chatHistory", { project: p, messages: hist });
     io.to(p).emit("systemMessage", { project: p, text: `👋 ${u} a rejoint le projet.` });
     presenceJoin(socket, p, u, uid);
+
+    if (requested !== p) {
+      socket.emit("projectError", { message: `Projet introuvable. Bascule automatique vers "${p}".` });
+    }
   });
  
   socket.on("leaveProject", () => {

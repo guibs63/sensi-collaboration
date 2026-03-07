@@ -1,11 +1,11 @@
 
-<!-- guibs:/index.html (COMPLET) — ULTRA v3.5.1 aligned (Railway + socket fallback + health + projet global) -->
+<!-- guibs:/index.html (COMPLET) — ULTRA v3.4.5 aligned (Railway + socket fallback + health) -->
 <!DOCTYPE html>
 <html lang="fr">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Sensi -IA-collaboratif_v1</title>
+  <title>Sensi-IA_travail_collaboratif</title>
 
   <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
   <meta http-equiv="Pragma" content="no-cache" />
@@ -15,8 +15,6 @@
     body{ font-family: Arial, sans-serif; margin:20px; max-width:1100px; }
     h1{ margin-bottom: 10px; }
     input, select, button{ padding:8px; font-size:14px; }
-    #project{ min-width:220px; }
-    #new-project{ min-width:220px; }
     button{ cursor:pointer; }
     .topbar{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
     .hint{ color:#666; font-size:12px; margin:6px 0 12px; }
@@ -45,7 +43,7 @@
 </head>
 
 <body>
-  <h1>Sensi -IA-collaboratif_v1 🚀</h1>
+  <h1>Sensi-IA_travail_collaboratif 🚀</h1>
 
   <div id="statusbar">
     Statut: <span id="status-text">chargement…</span>
@@ -60,11 +58,11 @@
   <div class="topbar">
     <input type="text" id="new-project" placeholder="Nouveau projet (ex: EverCell)" />
     <button id="create-project-btn" type="button">+ Créer</button>
-    <button id="delete-project-btn" type="button" class="danger">🗑️ Supprimer ce projet</button>
+    <button id="delete-project-btn" type="button" class="danger" title="Le projet global est protégé">🗑️ Supprimer ce projet</button>
   </div>
 
   <div class="hint">
-    Chat + projets temps réel.<br/>
+    Chat + projets temps réel. Le projet <strong>global</strong> est créé par défaut et protégé.<br/>
     🎧 Reconnaissance vocale : dicte ton message puis dis <strong>"over"</strong> (ou <strong>"ouvre"</strong> / <strong>"terminé"</strong>) pour envoyer automatiquement<br/>
     📊 FFT affichée pendant l'écoute / l'enregistrement.<br/>
     🎙️ Envoi audio : Enregistrer → Envoyer audio.

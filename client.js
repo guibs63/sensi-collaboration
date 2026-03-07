@@ -24,6 +24,7 @@ async function waitForIo() {
 }
 
 function cleanStr(v) { return String(v ?? "").trim(); }
+const DEFAULT_PROJECT = "global";
 
 /* ======================================================
    DOM
@@ -290,16 +291,46 @@ chat.addEventListener("click", (e) => {
    Projects list
    ====================================================== */
 
+function normalizeProjectsList(projects) {
+  const seen = new Set();
+  const normalized = [DEFAULT_PROJECT];
+
+  for (const raw of (projects || [])) {
+    const name = cleanStr(raw);
+    if (!name) continue;
+    if (name === DEFAULT_PROJECT) continue;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    normalized.push(name);
+  }
+
+  return normalized;
+}
+
+function syncProjectDeleteState(projects) {
+  if (!deleteProjectBtn) return;
+  const list = normalizeProjectsList(projects);
+  const selected = cleanStr(projectSelect?.value) || DEFAULT_PROJECT;
+  const isGlobal = selected === DEFAULT_PROJECT;
+  const isLastProject = list.length <= 1;
+
+  deleteProjectBtn.disabled = isGlobal || isLastProject;
+  deleteProjectBtn.title = isGlobal
+    ? 'Le projet "global" est protégé et ne peut pas être supprimé.'
+    : isLastProject
+      ? "Impossible de supprimer le dernier projet restant."
+      : "";
+}
+
 function setProjectsOptions(projects, keepSelection = true) {
+  const list = normalizeProjectsList(projects);
   const prev = keepSelection ? cleanStr(projectSelect.value) : "";
   projectSelect.innerHTML = "";
 
-  for (const p of (projects || [])) {
-    const name = cleanStr(p);
-    if (!name) continue;
+  for (const name of list) {
     const opt = document.createElement("option");
     opt.value = name;
-    opt.textContent = name;
+    opt.textContent = name === DEFAULT_PROJECT ? `${name} (par défaut)` : name;
     projectSelect.appendChild(opt);
   }
 
@@ -309,8 +340,10 @@ function setProjectsOptions(projects, keepSelection = true) {
   }
 
   if (!projectSelect.value && projectSelect.options.length > 0) {
-    projectSelect.value = projectSelect.options[0].value;
+    projectSelect.value = DEFAULT_PROJECT;
   }
+
+  syncProjectDeleteState(list);
 }
 
 /* ======================================================
@@ -963,7 +996,7 @@ form.addEventListener("submit", async (e) => {
 
 function joinProject() {
   const username = cleanStr(usernameInput.value);
-  const project = cleanStr(projectSelect.value);
+  const project = cleanStr(projectSelect.value) || DEFAULT_PROJECT;
 
   if (!username) return alert("Entre un pseudo 🙂");
   if (!project) return alert("Aucun projet disponible.");
@@ -979,6 +1012,7 @@ function joinProject() {
   renderPresence([]);
 
   setProjectLabel(currentProject);
+  syncProjectDeleteState(Array.from(projectSelect.options).map((o) => o.value));
   clearChat();
   addSystem(`Connexion au projet "${currentProject}"...`);
 
@@ -1010,7 +1044,7 @@ if (createProjectBtn && newProjectInput) {
         return;
       }
 
-      const list = Array.isArray(resp.projects) ? resp.projects : [];
+      const list = normalizeProjectsList(Array.isArray(resp.projects) ? resp.projects : []);
       if (list.length > 0) setProjectsOptions(list, false);
       if (resp.project) projectSelect.value = resp.project;
 
@@ -1035,16 +1069,36 @@ if (createProjectBtn && newProjectInput) {
 
 if (deleteProjectBtn) {
   deleteProjectBtn.addEventListener("click", () => {
-    const p = cleanStr(projectSelect.value);
-    if (!p) return;
-    const ok = confirm(`Supprimer le projet "${p}" ?\n\n⚠️ Cela supprime aussi son historique de messages.`);
+    const list = normalizeProjectsList(Array.from(projectSelect.options).map((o) => o.value));
+    const p = cleanStr(projectSelect.value) || DEFAULT_PROJECT;
+
+    if (p === DEFAULT_PROJECT) {
+      alert('Le projet "global" est protégé et ne peut pas être supprimé.');
+      syncProjectDeleteState(list);
+      return;
+    }
+
+    if (list.length <= 1) {
+      alert("Impossible de supprimer : il doit rester au moins un projet.");
+      syncProjectDeleteState(list);
+      return;
+    }
+
+    const ok = confirm(`Supprimer le projet "${p}" ?
+
+⚠️ Cela supprime aussi son historique de messages.`);
     if (!ok) return;
+
     socket.emit("deleteProject", { project: p }, (resp) => {
       if (!resp?.ok) {
-        alert(resp?.message || resp?.error || "Impossible de supprimer : il doit rester au moins un projet.");
-        return;
+        alert(resp?.message || resp?.error || "Suppression impossible.");
+        syncProjectDeleteState(list);
       }
     });
+  });
+
+  projectSelect.addEventListener("change", () => {
+    syncProjectDeleteState(Array.from(projectSelect.options).map((o) => o.value));
   });
 }
 
@@ -1054,6 +1108,7 @@ if (deleteProjectBtn) {
 
 const last = restoreLastSession();
 let projectsLoadedOnce = false;
+setProjectsOptions([DEFAULT_PROJECT], false);
 
 async function loadProjectsOnce() {
   if (projectsLoadedOnce) return;
@@ -1063,7 +1118,7 @@ async function loadProjectsOnce() {
     const res = await fetch("/projects", { cache: "no-store" });
     const data = await res.json().catch(() => ({}));
 
-    const list = Array.isArray(data) ? data : Array.isArray(data?.projects) ? data.projects : [];
+    const list = normalizeProjectsList(Array.isArray(data) ? data : Array.isArray(data?.projects) ? data.projects : []);
     if (list.length > 0) {
       setProjectsOptions(list, true);
       const want = cleanStr(last?.p);
@@ -1073,6 +1128,7 @@ async function loadProjectsOnce() {
     }
   } catch (_) {}
 
+  setProjectsOptions([DEFAULT_PROJECT], true);
   socket.emit("getProjects");
 }
 
@@ -1147,20 +1203,32 @@ async function initSocket() {
   });
 
   socket.on("projectsUpdate", (payload) => {
-    const list = Array.isArray(payload?.projects) ? payload.projects : [];
+    const list = normalizeProjectsList(Array.isArray(payload?.projects) ? payload.projects : []);
     setProjectsOptions(list, true);
 
     const want = cleanStr(localStorage.getItem(LS_LAST_PROJECT));
-    if (want && list.includes(want)) projectSelect.value = want;
+    if (want && list.includes(want)) {
+      projectSelect.value = want;
+    } else {
+      projectSelect.value = DEFAULT_PROJECT;
+    }
 
     if (currentProject && !list.includes(currentProject)) {
+      const previous = currentProject;
       currentProject = null;
       setProjectLabel("—");
       clearChat();
-      addSystem("Le projet courant a été supprimé. Choisis un autre projet puis Rejoindre.");
       renderPresence([]);
+      addSystem(`Le projet "${previous}" n'existe plus. Bascule sur "global".`);
+      projectSelect.value = DEFAULT_PROJECT;
+
+      const username = cleanStr(usernameInput.value);
+      if (username && socket?.connected) {
+        joinProject();
+      }
     }
 
+    syncProjectDeleteState(list);
     updateVoiceUiGate();
   });
 
@@ -1170,9 +1238,17 @@ async function initSocket() {
       currentProject = null;
       setProjectLabel("—");
       clearChat();
-      addSystem(`Le projet "${p}" a été supprimé.`);
       renderPresence([]);
+      projectSelect.value = DEFAULT_PROJECT;
+      addSystem(`Le projet "${p}" a été supprimé. Retour sur "global".`);
+
+      const username = cleanStr(usernameInput.value);
+      if (username && socket?.connected) {
+        joinProject();
+      }
     }
+
+    syncProjectDeleteState(Array.from(projectSelect.options).map((o) => o.value));
   });
 
   socket.on("projectError", (payload) => alert(payload?.message || "Erreur projet"));
@@ -1199,9 +1275,11 @@ async function initSocket() {
 (function initVoice() {
   if (!ENABLE_VOICE) return;
   ensureVoiceUI();
+  syncProjectDeleteState(Array.from(projectSelect.options).map((o) => o.value));
   updateVoiceUiGate();
 })();
 
 /* ======================================================
    CLEANUP (optional leaveProject)
    ====================================================== */
+
