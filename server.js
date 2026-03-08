@@ -51,7 +51,7 @@ app.use(express.static(ROOT, { fallthrough: true }));
 // =========================
 // AI config
 // =========================
-const VERSION = "ultra-v3.6.3-intuitive-ai-file-interpreter-deletefix";
+const VERSION = "ultra-v3.6.4-intuitive-ai-bulk-delete-sensi";
 const OPENAI_API_KEY = cleanStr(process.env.OPENAI_API_KEY);
 const AI_ENABLED = Boolean(OPENAI_API_KEY);
 const MODEL_TEXT = cleanStr(process.env.OPENAI_MODEL_TEXT) || "gpt-4.1-mini";
@@ -488,6 +488,45 @@ io.on("connection", (socket) => {
     saveJson(MESSAGES_FILE, messagesByProject);
     io.to(p).emit("messageDeleted", { project: p, messageId: mid });
     if (typeof ack === "function") ack({ ok: true });
+  });
+
+  socket.on("deleteSensiMessages", ({ project } = {}, ack) => {
+    const p = cleanStr(project) || cleanStr(socket.data.project);
+    if (!p) {
+      if (typeof ack === "function") ack({ ok: false, error: "bad_request" });
+      return;
+    }
+
+    const arr = Array.isArray(messagesByProject[p]) ? messagesByProject[p] : [];
+    if (!arr.length) {
+      if (typeof ack === "function") ack({ ok: true, deletedCount: 0, messageIds: [] });
+      return;
+    }
+
+    const deletedIds = [];
+    const kept = [];
+
+    for (const row of arr) {
+      const author = cleanStr(row?.username).toLowerCase();
+      const isBot = author === cleanStr(AI_BOT_NAME).toLowerCase();
+      if (isBot) {
+        const mid = Number(row?.id);
+        if (Number.isFinite(mid)) deletedIds.push(mid);
+        continue;
+      }
+      kept.push(row);
+    }
+
+    messagesByProject[p] = kept;
+    saveJson(MESSAGES_FILE, messagesByProject);
+
+    if (deletedIds.length) {
+      io.to(p).emit("bulkMessagesDeleted", { project: p, messageIds: deletedIds });
+    }
+
+    if (typeof ack === "function") {
+      ack({ ok: true, deletedCount: deletedIds.length, messageIds: deletedIds });
+    }
   });
 
   socket.on("disconnect", (reason) => {

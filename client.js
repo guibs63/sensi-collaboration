@@ -1,4 +1,4 @@
-// guibs:/client.js (COMPLET) — ULTRA v3.6.0 CLIENT — intuitive Sensi UX + global room + socket ready queue ✅
+// guibs:/client.js (COMPLET) — ULTRA v3.6.1 CLIENT — intuitive Sensi UX + delete Sensi + bulk delete ✅
 // VOICE fix: "over / au revoir" = triggers d’envoi, mais JAMAIS ajoutés au texte final.
 // Ajouts v3.6.0 :
 // - barre d’actions Sensi (analyse, résumé, web, docx/xlsx/pptx/image)
@@ -395,6 +395,7 @@ function ensureSensiBar() {
     { label: "Excel", action: "xlsx" },
     { label: "PPT", action: "pptx" },
     { label: "Image", action: "image" },
+    { label: "Effacer Sensi", action: "delete-sensi-messages" },
     { label: "Aide", action: "help" },
   ];
 
@@ -537,6 +538,31 @@ function ensureSensiBar() {
 
     if (action === "image") {
       putPromptInInput(inferNaturalImagePrompt(), { replace: true });
+      return;
+    }
+
+    if (action === "delete-sensi-messages") {
+      if (!currentProject) {
+        alert("Rejoins d'abord un projet.");
+        return;
+      }
+      if (!socket) {
+        alert("Socket non prêt.");
+        return;
+      }
+      const ok = confirm("Effacer tous les messages de Sensi dans ce projet ?");
+      if (!ok) return;
+      socket.emit("deleteSensiMessages", { project: currentProject }, (resp) => {
+        if (!resp?.ok) {
+          alert("Suppression impossible: " + (resp?.error || "unknown"));
+          return;
+        }
+        const count = Number(resp?.deletedCount || 0);
+        if (count <= 0) {
+          alert("Aucun message de Sensi à effacer.");
+          return;
+        }
+      });
       return;
     }
 
@@ -725,8 +751,10 @@ function addMessage({ id, ts, username, userId, message, attachment }) {
   row.className = "msg msg-row";
   if (Number.isFinite(mid)) row.dataset.mid = String(mid);
 
-  const canDelete = (cleanStr(userId) && cleanStr(userId) === cleanStr(myUserId)) || detectIsSensiMessage(username);
   const isSensi = detectIsSensiMessage(username);
+  const canDelete =
+    (cleanStr(userId) && cleanStr(userId) === cleanStr(myUserId)) ||
+    isSensi;
 
   row.innerHTML = `
     <div class="msg-main" style="display:flex; gap:10px; align-items:flex-start;">
@@ -740,7 +768,7 @@ function addMessage({ id, ts, username, userId, message, attachment }) {
         <button type="button"
           data-del="1"
           data-mid="${String(mid)}"
-          title="Supprimer mon message"
+          title="${isSensi ? "Supprimer ce message de Sensi" : "Supprimer mon message"}"
           style="border:1px solid #f2b8b5;background:#fff5f5;border-radius:10px;padding:4px 8px;cursor:pointer;">
           🗑️
         </button>
@@ -1761,6 +1789,13 @@ async function initSocket() {
     const p = cleanStr(project);
     if (currentProject && p && p !== currentProject) return;
     removeMessageNode(messageId);
+  });
+
+  socket.on("bulkMessagesDeleted", ({ project, messageIds } = {}) => {
+    const p = cleanStr(project);
+    if (currentProject && p && p !== currentProject) return;
+    const ids = Array.isArray(messageIds) ? messageIds : [];
+    for (const mid of ids) removeMessageNode(mid);
   });
 
   socket.on("projectsUpdate", (payload) => {
